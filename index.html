@@ -1292,6 +1292,18 @@ function annualTaxFor(s, grossAnnual){
    month's total salary paid. Review this treatment against your state's PT rules and your
    company's bonus policy; it's a reasonable default, not a statutory guarantee. */
 function round2(n){ return Math.round((Number(n)||0)*100)/100; }
+/* Returns the 12 'YYYY-MM' strings of the April-March fiscal year that `period` falls in. */
+function fyMonthsList(period){
+  const [y,m] = period.split('-').map(Number);
+  const fyStartYear = m>=4 ? y : y-1;
+  const months = [];
+  for(let i=0;i<12;i++){
+    let mm = 4+i, yy = fyStartYear;
+    if(mm>12){ mm-=12; yy+=1; }
+    months.push(yy+'-'+String(mm).padStart(2,'0'));
+  }
+  return months;
+}
 function computePayslip(emp, period, bonus){
   bonus = Number(bonus)||0;
   const s = latestSalaryFor(emp, period);
@@ -1315,16 +1327,29 @@ function computePayslip(emp, period, bonus){
     regularTds = round2(gross*rate);
     bonusTaxImpact = round2(tds - regularTds);
   } else {
-    const grossAnnual = gross*12;
-    const regularCalc = annualTaxFor(s, grossAnnual);
-    regularTds = round2(regularCalc.total/12);
-    tds = regularTds; taxableAnnual = regularCalc.taxableAnnual;
-    if(bonus > 0){
-      const withBonusCalc = annualTaxFor(s, grossAnnual + bonus);
-      bonusTaxImpact = round2(Math.max(0, withBonusCalc.total - regularCalc.total));
-      tds = round2(regularTds + bonusTaxImpact);
-      taxableAnnual = withBonusCalc.taxableAnnual;
-    }
+    // Cumulative (true-up) method: this month's TDS = (tax due on the revised full-year
+    // estimate, prorated for months elapsed so far) minus (TDS already deducted in this FY's
+    // earlier months). The estimate itself is actual YTD income (including any bonus already
+    // paid) plus projected income for the remaining months at the current salary. This isn't
+    // just a bonus-month adjustment — because it's driven by what's ACTUALLY been paid,
+    // a bonus that pushes annual income into a higher surcharge tier automatically carries
+    // that higher rate into every subsequent month too, with no special-casing needed. For a
+    // steady salary with no bonus, this reduces to exactly the same flat annual/12 figure as
+    // before.
+    const fyMonths = fyMonthsList(period);
+    const idx = fyMonths.indexOf(period);
+    const monthsElapsed = idx>=0 ? idx+1 : 1;
+    const priorPayslips = idx>=0 ? PAYSLIPS.filter(p=> p.empId===emp.id && fyMonths.indexOf(p.period)>=0 && fyMonths.indexOf(p.period)<idx) : [];
+    const actualYTDBeforeThis = priorPayslips.reduce((sum,p)=> sum + (Number(p.gross)||0) + (Number(p.bonus)||0), 0);
+    const priorTdsDeducted = priorPayslips.reduce((sum,p)=> sum + (Number(p.tds)||0), 0);
+    const remainingMonthsAfterThis = idx>=0 ? (11-idx) : 11;
+    const cumulativeAnnualEstimate = actualYTDBeforeThis + grossWithBonus + remainingMonthsAfterThis*gross;
+    const cumulativeCalc = annualTaxFor(s, cumulativeAnnualEstimate);
+    const dueSoFar = round2(cumulativeCalc.total * monthsElapsed / 12);
+    tds = round2(Math.max(0, dueSoFar - priorTdsDeducted));
+    regularTds = round2(cumulativeCalc.total/12); // the revised baseline rate — what this figure now implies for a steady month
+    bonusTaxImpact = round2(tds - regularTds);
+    taxableAnnual = cumulativeCalc.taxableAnnual;
   }
 
   const totalDeductions = round2(pfEmployee+esi+pt+tds);
