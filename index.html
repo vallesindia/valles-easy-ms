@@ -1281,16 +1281,17 @@ function annualTaxFor(s, grossAnnual){
   }
   return { taxableAnnual, total };
 }
-/* Ex-gratia / one-time bonus TDS: per Section 192's average-rate method, the bonus is NOT
-   annualised (×12) like regular salary — that would wildly overstate annual income. Instead:
-   compare "annual tax without the bonus" vs "annual tax with the bonus added once", and the
-   difference is the incremental tax the bonus itself causes. That full amount is deducted in
-   the bonus month; regular monthly TDS in every other month is unaffected. This matches how
-   most Indian payroll systems handle bonus TDS. Bonus is treated as fully taxable, and — per
-   common practice — excluded from PF/ESI wages (it isn't "basic wages") but included in the
-   month's gross for Professional Tax slab lookup, since PT is normally assessed on the
-   month's total salary paid. Review this treatment against your state's PT rules and your
-   company's bonus policy; it's a reasonable default, not a statutory guarantee. */
+/* Ex-gratia / one-time bonus TDS, and TDS generally: uses a cumulative true-up method (see
+   computePayslip below), not the simpler "flat annual/12, plus a one-off bonus adjustment"
+   approach this used to use. That older approach had a real gap — if a mid-year bonus pushed
+   annual income into a higher surcharge band (e.g. crossing ₹1cr, 10%→15%), only the bonus
+   month reflected it; every later month silently kept using the stale pre-bonus rate. The
+   cumulative method self-corrects every month from actual YTD income (including bonuses
+   already paid) plus projected remaining months, so a surcharge-band change carries forward
+   automatically. Bonus is treated as fully taxable, excluded from PF/ESI wages (not "basic
+   wages") but included in the month's gross for Professional Tax slab lookup, since PT is
+   normally assessed on the month's total salary paid. Review against your state's PT rules
+   and company bonus policy — reasonable default, not a statutory guarantee. */
 function round2(n){ return Math.round((Number(n)||0)*100)/100; }
 /* Returns the 12 'YYYY-MM' strings of the April-March fiscal year that `period` falls in. */
 function fyMonthsList(period){
@@ -1369,12 +1370,12 @@ function renderPayslips(c, actions){
     ${bonusSlips.length ? `
     <div class="card">
       <h2>Bonus &amp; TDS Impact Record</h2>
-      <p style="color:var(--muted);font-size:13px;">Every month an ex-gratia bonus was paid, and the extra tax it caused that month, on top of the employee's regular TDS.</p>
-      <table><thead><tr><th>Employee</th><th>Period</th><th class="num-cell">Bonus Paid</th><th class="num-cell">Regular TDS</th><th class="num-cell">Extra TDS on Bonus</th><th class="num-cell">Total TDS</th></tr></thead><tbody>
+      <p style="color:var(--muted);font-size:13px;">Every month an ex-gratia bonus was paid. TDS is now a cumulative true-up, so "Baseline Rate" reflects the FY estimate as revised by that bonus (and any others already paid), while "Catch-Up" is the extra pulled into that specific month to reconcile against what's already been deducted.</p>
+      <table><thead><tr><th>Employee</th><th>Period</th><th class="num-cell">Bonus Paid</th><th class="num-cell">Baseline Rate</th><th class="num-cell">Catch-Up This Month</th><th class="num-cell">Total TDS</th></tr></thead><tbody>
         ${bonusSlips.slice().reverse().map(p=>`
         <tr><td>${esc(p.empName)}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.bonus)}</td>
         <td class="num-cell">${money(p.regularTds!=null?p.regularTds:0)}</td>
-        <td class="num-cell" style="color:var(--accent);"><b>+${money(p.bonusTaxImpact||0)}</b></td>
+        <td class="num-cell" style="color:var(--accent);"><b>${(p.bonusTaxImpact||0)>=0?'+':''}${money(p.bonusTaxImpact||0)}</b></td>
         <td class="num-cell"><b>${money(p.tds)}</b></td></tr>`).join('')}
       </tbody></table>
     </div>` : ''}
@@ -1415,7 +1416,7 @@ function openEditPayslip(payslipId){
     <div class="section-label">Deductions</div>
     <div class="grid cols-3">
       ${f('Provident Fund','pfEmployee',p.pfEmployee)}${f('ESI','esi',p.esi)}${f('Professional Tax','pt',p.pt)}
-      ${f('Regular TDS','regularTds',p.regularTds!=null?p.regularTds:p.tds)}${f('Extra TDS on Bonus','bonusTaxImpact',p.bonusTaxImpact)}
+      ${f('Baseline TDS Rate','regularTds',p.regularTds!=null?p.regularTds:p.tds)}${f('Catch-Up This Month','bonusTaxImpact',p.bonusTaxImpact)}
     </div>
     <div class="divider"></div>
     <div id="editSlipTotals" class="grid cols-3"></div>
@@ -1498,12 +1499,12 @@ function openGeneratePayslip(){
         <div><label>EPF (12% Basic)</label><div>${money(r.pfEmployee)}</div></div>
         <div><label>ESI (0.75%)</label><div>${r.esi?money(r.esi):'N/A'}</div></div>
         <div><label>Professional Tax</label><div>${money(r.pt)}</div></div>
-        <div><label>Regular TDS (${r.salarySnapshot.taxRegime==='old'?'Old':'New'} Regime, est.)</label><div>${money(r.regularTds)}</div></div>
-        ${bonus>0 ? `<div><label style="color:var(--accent);">Extra TDS on Bonus</label><div style="color:var(--accent);"><b>+${money(r.bonusTaxImpact)}</b></div></div>` : ''}
+        <div><label>Baseline Monthly Rate (${r.salarySnapshot.taxRegime==='old'?'Old':'New'} Regime, revised for this FY)</label><div>${money(r.regularTds)}</div></div>
+        ${bonus>0 ? `<div><label style="color:var(--accent);">Catch-Up / Bonus Effect This Month</label><div style="color:var(--accent);"><b>${r.bonusTaxImpact>=0?'+':''}${money(r.bonusTaxImpact)}</b></div></div>` : ''}
         <div><label>Total TDS this month</label><div><b>${money(r.tds)}</b></div></div>
         <div><label>Net Pay</label><div><b>${money(r.netPay)}</b></div></div>
       </div>
-      ${bonus>0 ? `<div class="hint" style="margin-top:6px;">The bonus is not annualised — the app compares annual tax with and without it, and charges the ₹${Math.round(r.bonusTaxImpact).toLocaleString('en-IN')} difference entirely in this month. Regular TDS in other months is unaffected.</div>` : ''}`;
+      ${bonus>0 ? `<div class="hint" style="margin-top:6px;">This month's TDS is a true-up: tax on this employee's revised full-year estimate (actual income paid so far, including this bonus, plus projected remaining months) prorated to date, minus TDS already deducted this FY. If this bonus pushes annual income into a higher surcharge band, that higher rate carries into every month for the rest of this FY too — not just this one.</div>` : ''}`;
   }
   document.getElementById('genEmp').addEventListener('change', preview);
   document.getElementById('genPeriod').addEventListener('change', preview);
@@ -1588,7 +1589,7 @@ function openPayslipView(payslipId){
           <tr class="totrow"><td>GROSS EARNING</td><td class="amtcell">${money2(p.gross+(p.bonus||0))}</td><td>TOTAL DEDUCTION</td><td class="amtcell">${money2(p.totalDeductions)}</td></tr>
           <tr class="netrow"><td colspan="2">NET SALARY</td><td colspan="2" class="amtcell">${money2(p.netPay)}</td></tr>
           <tr class="wordsrow"><td colspan="4"><span class="wlabel">Net Salary (in words):</span> ${esc(rupeesInWords(p.netPay))}</td></tr>
-          ${p.bonus ? `<tr class="wordsrow"><td colspan="4"><span class="wlabel">TDS breakdown:</span> ${money2(p.regularTds)} regular + ${money2(p.bonusTaxImpact)} on this month's ex-gratia bonus (not annualised — the difference between annual tax with and without the bonus, charged in full this month; other months are unaffected).</td></tr>` : ''}
+          ${p.bonus ? `<tr class="wordsrow"><td colspan="4"><span class="wlabel">TDS note:</span> This month's TDS (${money2(p.tds)}) is a cumulative true-up reflecting actual income paid this FY (including this ${money2(p.bonus)} bonus) plus projected remaining months, minus TDS already deducted this year — so any resulting change in tax band carries forward to future months too, not just this one.</td></tr>` : ''}
         </table>
         <div class="payslip-foot">
           <span>Paid Through Bank Transfer${bankLine ? ' — ' + esc(bankLine) : ''}</span>
@@ -2317,7 +2318,7 @@ async function driveExportSheet(silent){
     const salRows = [['Employee ID','Name','Effective From','Basic','HRA','Children Education','Other Allowance','LTA','Reimbursement','Tax Regime','Rent Paid (annual)','Metro City','80C Declared','80D Declared','Other Exemptions','Revised At','Reason']];
     EMPLOYEES.forEach(e=> (e.salaryHistory||[]).forEach(h=> salRows.push([e.empCode,e.name,h.effectiveFrom,h.basic,h.hra,h.childrenEducation,h.otherAllowance,h.lta,h.reimbursement,h.taxRegime,h.rentPaidAnnual,h.metroCity?'Metro':'Non-Metro',h.declared80C,h.declared80D,h.otherExemptions,h.revisedAt,h.reason])));
 
-    const slipRows = [['Employee','Employee ID','Period','Department','Gross','Bonus','Regular TDS','Extra TDS on Bonus','Total Deductions','Net Pay','Tax Regime','Bank Account No.','Generated At']]
+    const slipRows = [['Employee','Employee ID','Period','Department','Gross','Bonus','Baseline TDS Rate','Catch-Up This Month','Total Deductions','Net Pay','Tax Regime','Bank Account No.','Generated At']]
       .concat(PAYSLIPS.map(p=>[p.empName,p.empCode,p.period,p.department,p.gross,p.bonus||0,p.regularTds!=null?p.regularTds:p.tds,p.bonusTaxImpact||0,p.totalDeductions,p.netPay,p.taxRegime,p.bankAccNo,p.generatedAt]));
 
     const compRows = [['Employee','Employee ID','Type','Period','Date','Reference No.','Amount','Remarks','Files Attached']];
