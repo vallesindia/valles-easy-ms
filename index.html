@@ -355,6 +355,11 @@ const DEFAULT_ORG = {
     slabs: [[250000,0],[500000,0.05],[1000000,0.20],[null,0.30]],
     surcharge: [[5000000,0.10],[10000000,0.15],[20000000,0.25],[50000000,0.37]]
   },
+  /* Flat rate applied directly to a one-time lump-sum bonus (e.g. a large ex-gratia), instead
+     of working it through the slab/surcharge machinery — a deliberate simplification some
+     companies prefer for large one-off payments. Editable in Settings → Income Tax Rules;
+     review against the employee's actual tax bracket, since one flat rate won't fit everyone. */
+  lumpSumBonusRate: 0.3588,
   adminPasswordHash: "", employeeSeq: 1,
   /* Transaction numbering — one running counter per category, e.g. QUOT-2026-0001.
      allowFinalisedTxnEdit unlocks edit/delete on Completed/Paid/Invoiced transactions,
@@ -497,6 +502,7 @@ function backfillOrgDefaults(){
   if(!ORG.chartOfAccounts) ORG.chartOfAccounts = JSON.parse(JSON.stringify(DEFAULT_ORG.chartOfAccounts));
   if(!ORG.vessels) ORG.vessels = [];
   if(ORG.ptAnnualCap===undefined) ORG.ptAnnualCap = 2500;
+  if(ORG.lumpSumBonusRate===undefined) ORG.lumpSumBonusRate = 0.3588;
   if(ORG.allowFinalisedTxnEdit===undefined) ORG.allowFinalisedTxnEdit = false;
   if(ORG.gstin===undefined) ORG.gstin = '';
   /* Add new org-profile fields here going forward, not just in DEFAULT_ORG — this function
@@ -1305,8 +1311,10 @@ function fyMonthsList(period){
   }
   return months;
 }
-function computePayslip(emp, period, bonus){
-  bonus = Number(bonus)||0;
+function computePayslip(emp, period, recurringAddition, lumpSum){
+  recurringAddition = Number(recurringAddition)||0;
+  lumpSum = Number(lumpSum)||0;
+  const bonus = recurringAddition + lumpSum; // combined figure, for PF/ESI/PT/display purposes
   const s = latestSalaryFor(emp, period);
   const gross = grossOf(s);
   const isContractor = s.taxRegime==='contractor';
@@ -1319,45 +1327,64 @@ function computePayslip(emp, period, bonus){
   const grossWithBonus = gross + bonus;
   const pt = ptFor(grossWithBonus, period);
 
-  let tds, regularTds, bonusTaxImpact = 0, taxableAnnual = 0;
+  let tds, appliedFlatRate = null, lumpSumTds = 0, taxableAnnual = 0;
   if(isContractor){
     // Section 194C: a flat % of what's actually paid this month — no annualisation, no
     // slabs, no standard deduction/80C/HRA. Bonus (if any) is just added to the same base.
     const rate = (s.contractorTdsRate!=null ? s.contractorTdsRate : 1)/100;
     tds = round2(grossWithBonus*rate);
-    regularTds = round2(gross*rate);
-    bonusTaxImpact = round2(tds - regularTds);
-  } else {
-    // Cumulative (true-up) method: this month's TDS = (tax due on the revised full-year
-    // estimate, prorated for months elapsed so far) minus (TDS already deducted in this FY's
-    // earlier months). The estimate itself is actual YTD income (including any bonus already
-    // paid) plus projected income for the remaining months at the current salary. This isn't
-    // just a bonus-month adjustment — because it's driven by what's ACTUALLY been paid,
-    // a bonus that pushes annual income into a higher surcharge tier automatically carries
-    // that higher rate into every subsequent month too, with no special-casing needed. For a
-    // steady salary with no bonus, this reduces to exactly the same flat annual/12 figure as
-    // before.
+  } else if(lumpSum > 0){
+    // One-time lump sum (e.g. a large ex-gratia): apply a flat, company-configured rate
+    // directly to the lump sum itself — deducted entirely this month — then recompute the
+    // flat "% of gross" rate needed to collect exactly the remaining balance of this
+    // employee's correct full-year tax liability across this month's own regular pay and
+    // every month left in the FY. Any smaller recurring addition (paid alongside this) is
+    // folded into "gross" for that recomputed rate, not given the lump-sum treatment.
+    const lumpSumRate = Number(ORG.lumpSumBonusRate)||0.3588;
+    lumpSumTds = round2(lumpSum*lumpSumRate);
     const fyMonths = fyMonthsList(period);
     const idx = fyMonths.indexOf(period);
-    const monthsElapsed = idx>=0 ? idx+1 : 1;
+    const monthsRemainingInclusive = idx>=0 ? (12-idx) : 12;
     const priorPayslips = idx>=0 ? PAYSLIPS.filter(p=> p.empId===emp.id && fyMonths.indexOf(p.period)>=0 && fyMonths.indexOf(p.period)<idx) : [];
-    const actualYTDBeforeThis = priorPayslips.reduce((sum,p)=> sum + (Number(p.gross)||0) + (Number(p.bonus)||0), 0);
     const priorTdsDeducted = priorPayslips.reduce((sum,p)=> sum + (Number(p.tds)||0), 0);
-    const remainingMonthsAfterThis = idx>=0 ? (11-idx) : 11;
-    const cumulativeAnnualEstimate = actualYTDBeforeThis + grossWithBonus + remainingMonthsAfterThis*gross;
-    const cumulativeCalc = annualTaxFor(s, cumulativeAnnualEstimate);
-    const dueSoFar = round2(cumulativeCalc.total * monthsElapsed / 12);
-    tds = round2(Math.max(0, dueSoFar - priorTdsDeducted));
-    regularTds = round2(cumulativeCalc.total/12); // the revised baseline rate — what this figure now implies for a steady month
-    bonusTaxImpact = round2(tds - regularTds);
-    taxableAnnual = cumulativeCalc.taxableAnnual;
+    const priorLumpSums = priorPayslips.reduce((sum,p)=> sum + (Number(p.lumpSum)||0), 0);
+    // Full-year projection (not cumulative actuals) — regular annual gross + this recurring
+    // addition assumed for all 12 months + every lump sum paid this FY so far, including this
+    // one. Must accumulate prior lump sums explicitly — a second lump-sum event later in the
+    // year needs to still account for the first one's impact on the annual estimate, not just
+    // its own amount.
+    const totalAnnualEstimate = gross*12 + recurringAddition*12 + priorLumpSums + lumpSum;
+    const totalAnnualCalc = annualTaxFor(s, totalAnnualEstimate);
+    const totalAnnualTax = totalAnnualCalc.total;
+    const remainingBalance = totalAnnualTax - priorTdsDeducted - lumpSumTds;
+    const remainingGrossForRestOfYear = monthsRemainingInclusive*(gross+recurringAddition);
+    appliedFlatRate = remainingGrossForRestOfYear>0 ? Math.max(0, remainingBalance/remainingGrossForRestOfYear) : 0;
+    tds = round2(lumpSumTds + (gross+recurringAddition)*appliedFlatRate);
+    taxableAnnual = totalAnnualCalc.taxableAnnual;
+  } else {
+    // Regular month, or one with only a smaller recurring addition: use whatever flat rate
+    // is currently in force for this FY — the rate set by the most recent lump-sum event
+    // this year, if any, otherwise the baseline rate implied by this employee's standard
+    // annual tax ÷ standard annual gross (matches a steady month with no bonus history).
+    const fyMonths = fyMonthsList(period);
+    const idx = fyMonths.indexOf(period);
+    const priorPayslips = idx>=0 ? PAYSLIPS.filter(p=> p.empId===emp.id && fyMonths.indexOf(p.period)>=0 && fyMonths.indexOf(p.period)<idx) : [];
+    const lastLumpSumEvent = priorPayslips.slice().reverse().find(p=> p.appliedFlatRate!=null);
+    if(lastLumpSumEvent){
+      appliedFlatRate = lastLumpSumEvent.appliedFlatRate;
+    } else {
+      const baseline = annualTaxFor(s, gross*12);
+      appliedFlatRate = gross>0 ? baseline.total/(gross*12) : 0;
+      taxableAnnual = baseline.taxableAnnual;
+    }
+    tds = round2((gross+recurringAddition)*appliedFlatRate);
   }
 
   const totalDeductions = round2(pfEmployee+esi+pt+tds);
   const netPay = round2(gross+bonus-totalDeductions);
   const ctc = round2(gross+pfEmployer+(s.reimbursement||0));
-  return {salarySnapshot:s, gross, bonus, pfEmployee, pfEmployer, esi, pt, tds, regularTds, bonusTaxImpact,
-    totalDeductions, netPay, reimbursement:s.reimbursement||0, ctc, taxableAnnual};
+  return {salarySnapshot:s, gross, bonus, recurringAddition, lumpSum, pfEmployee, pfEmployer, esi, pt, tds,
+    appliedFlatRate, lumpSumTds, totalDeductions, netPay, reimbursement:s.reimbursement||0, ctc, taxableAnnual};
 }
 
 /* ============================= PAYSLIPS ============================= */
@@ -1370,12 +1397,12 @@ function renderPayslips(c, actions){
     ${bonusSlips.length ? `
     <div class="card">
       <h2>Bonus &amp; TDS Impact Record</h2>
-      <p style="color:var(--muted);font-size:13px;">Every month an ex-gratia bonus was paid. TDS is now a cumulative true-up, so "Baseline Rate" reflects the FY estimate as revised by that bonus (and any others already paid), while "Catch-Up" is the extra pulled into that specific month to reconcile against what's already been deducted.</p>
-      <table><thead><tr><th>Employee</th><th>Period</th><th class="num-cell">Bonus Paid</th><th class="num-cell">Baseline Rate</th><th class="num-cell">Catch-Up This Month</th><th class="num-cell">Total TDS</th></tr></thead><tbody>
+      <p style="color:var(--muted);font-size:13px;">Every month with a recurring addition and/or a one-time lump sum. "Applied Rate" is the flat % of gross in force that month; "Lump Sum TDS" is the flat-rate deduction taken directly on any one-time payment that month.</p>
+      <table><thead><tr><th>Employee</th><th>Period</th><th class="num-cell">Recurring</th><th class="num-cell">Lump Sum</th><th class="num-cell">Applied Rate</th><th class="num-cell">Lump Sum TDS</th><th class="num-cell">Total TDS</th></tr></thead><tbody>
         ${bonusSlips.slice().reverse().map(p=>`
-        <tr><td>${esc(p.empName)}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.bonus)}</td>
-        <td class="num-cell">${money(p.regularTds!=null?p.regularTds:0)}</td>
-        <td class="num-cell" style="color:var(--accent);"><b>${(p.bonusTaxImpact||0)>=0?'+':''}${money(p.bonusTaxImpact||0)}</b></td>
+        <tr><td>${esc(p.empName)}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.recurringAddition||0)}</td><td class="num-cell">${money(p.lumpSum||0)}</td>
+        <td class="num-cell">${p.appliedFlatRate!=null?(p.appliedFlatRate*100).toFixed(2)+'%':'—'}</td>
+        <td class="num-cell" style="color:var(--accent);">${p.lumpSumTds?money(p.lumpSumTds):'—'}</td>
         <td class="num-cell"><b>${money(p.tds)}</b></td></tr>`).join('')}
       </tbody></table>
     </div>` : ''}
@@ -1411,13 +1438,15 @@ function openEditPayslip(payslipId){
     <div class="section-label">Earnings</div>
     <div class="grid cols-3">
       ${f('Basic','basic',p.basic)}${f('HRA','hra',p.hra)}${f('Children Education','childrenEducation',p.childrenEducation)}
-      ${f('Other Allowance','otherAllowance',p.otherAllowance)}${f('LTA','lta',p.lta)}${f('Ex-Gratia Bonus','bonus',p.bonus)}
+      ${f('Other Allowance','otherAllowance',p.otherAllowance)}${f('LTA','lta',p.lta)}${f('Recurring Addition','recurringAddition',p.recurringAddition||0)}
     </div>
+    <div class="grid cols-3">${f('One-Time Lump Sum','lumpSum',p.lumpSum||0)}</div>
     <div class="section-label">Deductions</div>
     <div class="grid cols-3">
       ${f('Provident Fund','pfEmployee',p.pfEmployee)}${f('ESI','esi',p.esi)}${f('Professional Tax','pt',p.pt)}
-      ${f('Baseline TDS Rate','regularTds',p.regularTds!=null?p.regularTds:p.tds)}${f('Catch-Up This Month','bonusTaxImpact',p.bonusTaxImpact)}
+      ${f('TDS (total, editable)','tds',p.tds)}
     </div>
+    <p class="hint" style="margin:-4px 0 8px;">${p.appliedFlatRate!=null?`Applied rate when generated: ${(p.appliedFlatRate*100).toFixed(2)}%. `:''}${p.lumpSumTds?`Lump-sum TDS when generated: ${money2(p.lumpSumTds)}. `:''}Editing TDS here overrides the generated figure directly — it won't recompute from rate/lump-sum.</p>
     <div class="divider"></div>
     <div id="editSlipTotals" class="grid cols-3"></div>
     <div class="btn-row"><button class="btn" id="saveSlipEdit">Save Changes</button><button class="btn secondary" id="mCancel">Cancel</button></div>
@@ -1428,13 +1457,14 @@ function openEditPayslip(payslipId){
   function recalc(){
     const v = vals();
     const gross = v.basic + v.hra + v.childrenEducation + v.otherAllowance + v.lta;
-    const tds = v.regularTds + v.bonusTaxImpact;
+    const bonus = v.recurringAddition + v.lumpSum;
+    const tds = v.tds;
     const ded = v.pfEmployee + v.esi + v.pt + tds;
     document.getElementById('editSlipTotals').innerHTML =
-      `<div><label>Gross Earning (incl. bonus)</label><div><b>${money2(gross+v.bonus)}</b></div></div>
+      `<div><label>Gross Earning (incl. bonus)</label><div><b>${money2(gross+bonus)}</b></div></div>
        <div><label>Total Deduction (TDS: ${money2(tds)})</label><div><b>${money2(ded)}</b></div></div>
-       <div><label>Net Salary</label><div><b>${money2(gross+v.bonus-ded)}</b></div></div>
-       <div style="grid-column:1/-1;font-size:11px;color:var(--muted);font-style:italic;">${esc(rupeesInWords(gross+v.bonus-ded))}</div>`;
+       <div><label>Net Salary</label><div><b>${money2(gross+bonus-ded)}</b></div></div>
+       <div style="grid-column:1/-1;font-size:11px;color:var(--muted);font-style:italic;">${esc(rupeesInWords(gross+bonus-ded))}</div>`;
   }
   inputs().forEach(i=> i.addEventListener('input', recalc));
   recalc();
@@ -1452,10 +1482,10 @@ function openEditPayslip(payslipId){
 async function submitPayslipEdit(payslipId, v){
     const p = PAYSLIPS.find(x=>x.id===payslipId); if(!p) return;
     Object.assign(p, v);
-    p.tds = v.regularTds + v.bonusTaxImpact;
+    p.bonus = v.recurringAddition + v.lumpSum;
     p.gross = v.basic + v.hra + v.childrenEducation + v.otherAllowance + v.lta;
     p.totalDeductions = v.pfEmployee + v.esi + v.pt + p.tds;
-    p.netPay = p.gross + v.bonus - p.totalDeductions;
+    p.netPay = p.gross + p.bonus - p.totalDeductions;
     tagRecord(p, false);
     await savePayslips(); closeModal(); toast('Payslip updated.'); render();
 }
@@ -1483,15 +1513,20 @@ function openGeneratePayslip(){
       <div class="field"><label>Employee</label><select id="genEmp">${EMPLOYEES.map(e=>`<option value="${e.id}">${esc(e.name)} (${esc(e.empCode)})</option>`).join('')}</select></div>
       <div class="field"><label>Period (Month)</label><input type="month" id="genPeriod" value="${defaultPeriod}"></div>
     </div>
-    <div class="field"><label>Ex-Gratia Bonus / One-Time Payment this month (₹, optional)</label><input type="number" min="0" step="0.01" id="genBonus" value="0"></div>
+    <div class="grid cols-2">
+      <div class="field"><label>Recurring Monthly Addition (₹, optional)</label><input type="number" min="0" step="0.01" id="genRecurring" value="0"></div>
+      <div class="field"><label>One-Time Lump Sum This Month (₹, optional)</label><input type="number" min="0" step="0.01" id="genLumpSum" value="0"></div>
+    </div>
+    <p class="hint" style="margin:-6px 0 8px;">Recurring addition (e.g. a monthly ex-gratia that continues every month) is folded into gross for TDS purposes. A one-time lump sum (e.g. a large annual bonus) gets a flat rate applied directly, and recalculates the rate for the rest of this FY.</p>
     <div id="genPreview"></div>
     <div class="btn-row"><button class="btn" id="genConfirm">Generate</button><button class="btn secondary" id="mCancel">Cancel</button></div>
   `);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
   function preview(){
     const emp = EMPLOYEES.find(x=>x.id===document.getElementById('genEmp').value); if(!emp) return;
-    const bonus = Number(document.getElementById('genBonus').value)||0;
-    const r = computePayslip(emp, document.getElementById('genPeriod').value, bonus);
+    const recurring = Number(document.getElementById('genRecurring').value)||0;
+    const lump = Number(document.getElementById('genLumpSum').value)||0;
+    const r = computePayslip(emp, document.getElementById('genPeriod').value, recurring, lump);
     document.getElementById('genPreview').innerHTML = `
       <div class="divider"></div>
       <div class="grid cols-3">
@@ -1499,16 +1534,17 @@ function openGeneratePayslip(){
         <div><label>EPF (12% Basic)</label><div>${money(r.pfEmployee)}</div></div>
         <div><label>ESI (0.75%)</label><div>${r.esi?money(r.esi):'N/A'}</div></div>
         <div><label>Professional Tax</label><div>${money(r.pt)}</div></div>
-        <div><label>Baseline Monthly Rate (${r.salarySnapshot.taxRegime==='old'?'Old':'New'} Regime, revised for this FY)</label><div>${money(r.regularTds)}</div></div>
-        ${bonus>0 ? `<div><label style="color:var(--accent);">Catch-Up / Bonus Effect This Month</label><div style="color:var(--accent);"><b>${r.bonusTaxImpact>=0?'+':''}${money(r.bonusTaxImpact)}</b></div></div>` : ''}
+        <div><label>Applied Rate (${r.salarySnapshot.taxRegime==='old'?'Old':'New'} Regime)</label><div>${r.appliedFlatRate!=null?(r.appliedFlatRate*100).toFixed(2)+'%':'—'}</div></div>
+        ${lump>0 ? `<div><label style="color:var(--accent);">Flat TDS on Lump Sum</label><div style="color:var(--accent);"><b>${money(r.lumpSumTds)}</b></div></div>` : ''}
         <div><label>Total TDS this month</label><div><b>${money(r.tds)}</b></div></div>
         <div><label>Net Pay</label><div><b>${money(r.netPay)}</b></div></div>
       </div>
-      ${bonus>0 ? `<div class="hint" style="margin-top:6px;">This month's TDS is a true-up: tax on this employee's revised full-year estimate (actual income paid so far, including this bonus, plus projected remaining months) prorated to date, minus TDS already deducted this FY. If this bonus pushes annual income into a higher surcharge band, that higher rate carries into every month for the rest of this FY too — not just this one.</div>` : ''}`;
+      ${lump>0 ? `<div class="hint" style="margin-top:6px;">The lump sum's own TDS (${money(r.lumpSumTds)}, at the configured flat rate) is deducted entirely this month. The remaining balance of this employee's correct full-year tax is then spread as a flat % of gross across this month's own regular pay and every month left in this FY — carrying forward automatically until another lump sum or a new financial year resets it.</div>` : ''}`;
   }
   document.getElementById('genEmp').addEventListener('change', preview);
   document.getElementById('genPeriod').addEventListener('change', preview);
-  document.getElementById('genBonus').addEventListener('input', preview);
+  document.getElementById('genRecurring').addEventListener('input', preview);
+  document.getElementById('genLumpSum').addEventListener('input', preview);
   preview();
   document.getElementById('genConfirm').onclick = async ()=>{
     const btn = document.getElementById('genConfirm');
@@ -1517,8 +1553,9 @@ function openGeneratePayslip(){
       const emp = EMPLOYEES.find(x=>x.id===document.getElementById('genEmp').value);
       if(!emp) throw new Error('No employee selected.');
       const period = document.getElementById('genPeriod').value;
-      const bonus = Number(document.getElementById('genBonus').value)||0;
-      const r = computePayslip(emp, period, bonus);
+      const recurring = Number(document.getElementById('genRecurring').value)||0;
+      const lump = Number(document.getElementById('genLumpSum').value)||0;
+      const r = computePayslip(emp, period, recurring, lump);
       const record = {
         id:uid(), empId:emp.id, empName:emp.name, empCode:emp.empCode, designation:emp.designation,
         department:emp.department, grade:emp.grade, location:emp.location, division:emp.division,
@@ -1527,8 +1564,9 @@ function openGeneratePayslip(){
         bankAccNo:emp.bankAccNo, bankName:emp.bankName, ifsc:emp.ifsc, period,
         basic:r.salarySnapshot.basic, hra:r.salarySnapshot.hra, childrenEducation:r.salarySnapshot.childrenEducation,
         otherAllowance:r.salarySnapshot.otherAllowance, lta:r.salarySnapshot.lta,
-        gross:r.gross, bonus:r.bonus, pfEmployee:r.pfEmployee, pfEmployer:r.pfEmployer, esi:r.esi, pt:r.pt, tds:r.tds,
-        regularTds:r.regularTds, bonusTaxImpact:r.bonusTaxImpact,
+        gross:r.gross, bonus:r.bonus, recurringAddition:r.recurringAddition, lumpSum:r.lumpSum,
+        pfEmployee:r.pfEmployee, pfEmployer:r.pfEmployer, esi:r.esi, pt:r.pt, tds:r.tds,
+        appliedFlatRate:r.appliedFlatRate, lumpSumTds:r.lumpSumTds,
         totalDeductions:r.totalDeductions, netPay:r.netPay, reimbursement:r.reimbursement, ctc:r.ctc,
         taxRegime:r.salarySnapshot.taxRegime, taxableAnnual:r.taxableAnnual,
         generatedAt: new Date().toISOString()
@@ -1589,7 +1627,7 @@ function openPayslipView(payslipId){
           <tr class="totrow"><td>GROSS EARNING</td><td class="amtcell">${money2(p.gross+(p.bonus||0))}</td><td>TOTAL DEDUCTION</td><td class="amtcell">${money2(p.totalDeductions)}</td></tr>
           <tr class="netrow"><td colspan="2">NET SALARY</td><td colspan="2" class="amtcell">${money2(p.netPay)}</td></tr>
           <tr class="wordsrow"><td colspan="4"><span class="wlabel">Net Salary (in words):</span> ${esc(rupeesInWords(p.netPay))}</td></tr>
-          ${p.bonus ? `<tr class="wordsrow"><td colspan="4"><span class="wlabel">TDS note:</span> This month's TDS (${money2(p.tds)}) is a cumulative true-up reflecting actual income paid this FY (including this ${money2(p.bonus)} bonus) plus projected remaining months, minus TDS already deducted this year — so any resulting change in tax band carries forward to future months too, not just this one.</td></tr>` : ''}
+          ${p.bonus ? `<tr class="wordsrow"><td colspan="4"><span class="wlabel">TDS note:</span> This month's TDS (${money2(p.tds)}) includes ${money2(p.bonus)} in bonus/addition.${p.lumpSumTds?` A flat-rate deduction of ${money2(p.lumpSumTds)} was taken on the one-time lump sum this month.`:''}${p.appliedFlatRate!=null?` The remaining pay this month, and every month for the rest of this FY, is taxed at ${(p.appliedFlatRate*100).toFixed(2)}% of gross.`:''}</td></tr>` : ''}
         </table>
         <div class="payslip-foot">
           <span>Paid Through Bank Transfer${bankLine ? ' — ' + esc(bankLine) : ''}</span>
@@ -2318,8 +2356,8 @@ async function driveExportSheet(silent){
     const salRows = [['Employee ID','Name','Effective From','Basic','HRA','Children Education','Other Allowance','LTA','Reimbursement','Tax Regime','Rent Paid (annual)','Metro City','80C Declared','80D Declared','Other Exemptions','Revised At','Reason']];
     EMPLOYEES.forEach(e=> (e.salaryHistory||[]).forEach(h=> salRows.push([e.empCode,e.name,h.effectiveFrom,h.basic,h.hra,h.childrenEducation,h.otherAllowance,h.lta,h.reimbursement,h.taxRegime,h.rentPaidAnnual,h.metroCity?'Metro':'Non-Metro',h.declared80C,h.declared80D,h.otherExemptions,h.revisedAt,h.reason])));
 
-    const slipRows = [['Employee','Employee ID','Period','Department','Gross','Bonus','Baseline TDS Rate','Catch-Up This Month','Total Deductions','Net Pay','Tax Regime','Bank Account No.','Generated At']]
-      .concat(PAYSLIPS.map(p=>[p.empName,p.empCode,p.period,p.department,p.gross,p.bonus||0,p.regularTds!=null?p.regularTds:p.tds,p.bonusTaxImpact||0,p.totalDeductions,p.netPay,p.taxRegime,p.bankAccNo,p.generatedAt]));
+    const slipRows = [['Employee','Employee ID','Period','Department','Gross','Recurring Addition','Lump Sum','Applied Rate','Lump Sum TDS','Total TDS','Total Deductions','Net Pay','Tax Regime','Bank Account No.','Generated At']]
+      .concat(PAYSLIPS.map(p=>[p.empName,p.empCode,p.period,p.department,p.gross,p.recurringAddition||0,p.lumpSum||0,p.appliedFlatRate!=null?(p.appliedFlatRate*100).toFixed(2)+'%':'',p.lumpSumTds||0,p.tds,p.totalDeductions,p.netPay,p.taxRegime,p.bankAccNo,p.generatedAt]));
 
     const compRows = [['Employee','Employee ID','Type','Period','Date','Reference No.','Amount','Remarks','Files Attached']];
     Object.keys(COMPLIANCE||{}).forEach(empId=>{
@@ -4399,6 +4437,9 @@ function renderSettings(c, actions){
         <div data-slabwrap="${key}-surcharge"></div>
         <button type="button" class="btn secondary sm" data-addsurcharge="${key}">+ Add Surcharge Tier</button>
       `; }).join('')}
+      <div class="section-label" style="margin-top:18px;">Lump-Sum Bonus TDS Rate</div>
+      <p class="hint" style="margin:-4px 0 8px;">Flat rate applied directly to a one-time lump-sum ex-gratia payment (not the recurring monthly addition), instead of running it through the slab machinery — used when Generate Payslip's "One-Time Lump Sum" field is filled in. Set this to match your company's policy; it isn't derived from the slabs above.</p>
+      <div class="grid cols-3"><div class="field"><label>Rate (%)</label><input type="number" step="0.01" min="0" max="100" id="lumpSumRateField" value="${(ORG.lumpSumBonusRate*100).toFixed(2)}"></div></div>
       <div class="btn-row" style="margin-top:14px;"><button class="btn sm" id="saveTaxRules">Save Income Tax Rules</button></div>
     </div>
 
@@ -4726,6 +4767,8 @@ function renderSettings(c, actions){
         else ORG[key].surcharge[idx][1] = (Number(inp.value)||0)/100;
       });
     });
+    const lsr = document.getElementById('lumpSumRateField');
+    if(lsr) ORG.lumpSumBonusRate = (Number(lsr.value)||0)/100;
     await saveOrg(); toast('Income tax rules saved.');
   };
 
