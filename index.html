@@ -3671,6 +3671,10 @@ function calcExpenseTotals(e){
     if(e.gstMode==='Inter') igst = gstAmt;
     else if(e.gstMode==='Intra'){ cgst = gstAmt/2; sgst = gstAmt/2; }
   }
+  // GST amount is always rounded to the nearest rupee — under 50 paise rounds down, 50 paise
+  // and above rounds up (standard GST invoice rounding). Each component rounds separately,
+  // matching how a real tax invoice itemises CGST/SGST/IGST.
+  cgst = Math.round(cgst); sgst = Math.round(sgst); igst = Math.round(igst);
   const gstTotal = cgst+sgst+igst;
   const tdsAmount = e.tdsApplicable ? amtINR * (Number(e.tdsRate)||0) / 100 : 0;
   const deductionsTotal = e.deductionsApplicable ? (Number(e.pfAmt)||0)+(Number(e.ptAmt)||0)+(Number(e.esicAmt)||0)+(Number(e.otherDeduction)||0) : 0;
