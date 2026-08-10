@@ -3655,7 +3655,12 @@ function calcExpenseTotals(e){
   }
   if(billType==='SALARY'){
     const amt = Number(e.statutoryAmount)||0;
-    const tdsAmount = e.tdsApplicable ? amt*(Number(e.tdsRate)||0)/100 : 0;
+    // Prefer the exact TDS amount when available (e.g. auto-filled from a payslip) over
+    // recomputing from a rate — a rate is inherently a rounded approximation (stored to 4
+    // decimal places) of amount÷gross, so reapplying rate×gross introduces a small precision
+    // loss the original amount never had. Falls back to rate×amount when no exact figure is
+    // on record (manual entry, or a rate the user deliberately typed in themselves).
+    const tdsAmount = e.tdsApplicable ? (e.tdsFlatAmount!=null && e.tdsFlatAmount!=='' ? Number(e.tdsFlatAmount) : amt*(Number(e.tdsRate)||0)/100) : 0;
     const deductionsTotal = e.deductionsApplicable ? (Number(e.pfAmt)||0)+(Number(e.ptAmt)||0)+(Number(e.esicAmt)||0)+(Number(e.otherDeduction)||0) : 0;
     const netPayable = amt - tdsAmount - deductionsTotal;
     const balance = netPayable-(Number(e.paidAmount)||0); // negative = overpaid, kept visible rather than clamped to 0
@@ -3895,6 +3900,7 @@ function openExpenseForm(expId){
           <option value="">— Select Section —</option>${TDS_SECTIONS.map(s=>`<option value="${s.id}" ${e.tdsSectionId===s.id?'selected':''}>${esc(tdsSectionLabel(s))}</option>`).join('')}
         </select></div>
         <div class="field"><label>TDS Rate %</label><input type="number" min="0" step="0.01" name="tdsRate" id="expTdsRate" value="${e.tdsRate}"></div>
+        <input type="hidden" name="tdsFlatAmount" id="expTdsFlatAmount" value="${e.tdsFlatAmount!=null?e.tdsFlatAmount:''}">
       </div>
       </div>
       <div id="expDeductionsSection" style="background:#FAF5FF;border:1px solid #E9D5FF;border-radius:8px;padding:10px 12px;margin:12px 0;">
@@ -4015,6 +4021,9 @@ function openExpenseForm(expId){
     document.getElementById('expTdsFields').style.display = payslip.tds>0 ? 'grid' : 'none';
     if(payslip.tds>0){
       document.getElementById('expTdsRate').value = (payslip.tds/payslip.gross*100).toFixed(4);
+      document.getElementById('expTdsFlatAmount').value = payslip.tds; // exact figure — avoids the rate-round-trip precision loss
+    } else {
+      document.getElementById('expTdsFlatAmount').value = '';
     }
     document.getElementById('expDeductChk').checked = true;
     document.getElementById('expDeductFields').style.display = 'grid';
@@ -4042,6 +4051,7 @@ function openExpenseForm(expId){
       rcmSupplyType: document.getElementById('expRcmSupply').value,
       tdsApplicable: document.getElementById('expTdsChk').checked,
       tdsRate: Number(document.getElementById('expTdsRate').value)||0,
+      tdsFlatAmount: document.getElementById('expTdsFlatAmount').value!=='' ? Number(document.getElementById('expTdsFlatAmount').value) : null,
       deductionsApplicable: document.getElementById('expDeductChk').checked,
       pfAmt: Number(document.getElementById('expPF').value)||0,
       ptAmt: Number(document.getElementById('expPT').value)||0,
@@ -4094,6 +4104,7 @@ function openExpenseForm(expId){
     drawTotalsPreview();
   });
   ['expBillAmount','expExchRate','expGstMode','expGstPct','expRcmRate','expRcmSupply','expTdsRate','expPaidAmount','expPF','expPT','expESIC','expOtherDed','expStatutoryAmount','expTransferAmount'].forEach(id=> document.getElementById(id).addEventListener('input', drawTotalsPreview));
+  document.getElementById('expTdsRate').addEventListener('input', ()=>{ document.getElementById('expTdsFlatAmount').value = ''; });
   drawTotalsPreview();
 
   /* Bank details shown here are read from Settings → Company Details — the person doesn't
