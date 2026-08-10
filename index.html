@@ -407,11 +407,11 @@ const DEFAULT_ORG = {
 
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 function money(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {maximumFractionDigits:0}); }
-function money2(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {maximumFractionDigits:2}); }
+function money2(n){ n = Number(n)||0; return "₹" + n.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 /* No symbol — for wherever a currency symbol is explicitly prepended already (multi-currency
    transactions), since money()/money2() always hardcode a rupee symbol regardless of actual
    currency and would double up with it otherwise. */
-function moneyPlain2(n){ n = Number(n)||0; return n.toLocaleString('en-IN', {maximumFractionDigits:2}); }
+function moneyPlain2(n){ n = Number(n)||0; return n.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 function timeAgo(iso){
   const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime())/1000));
   if(s < 60) return 'just now';
@@ -3615,9 +3615,14 @@ const EXPENSE_CATEGORIES = ['Materials','Services','Rent','Utilities','Transport
 function nextExpNo(){
   const fy = currentFYShort();
   const key = 'EXP-'+fy;
-  const seq = ORG.expSeq[key]||1;
-  ORG.expSeq[key] = seq+1;
-  return `${ORG.expPrefix}${fy}${String(seq).padStart(3,'0')}`;
+  const stub = ORG.expPrefix+fy;
+  const existingNums = EXPENSES
+    .filter(e=> e.voucherNo && e.voucherNo.indexOf(stub)===0)
+    .map(e=> parseInt(e.voucherNo.slice(stub.length), 10))
+    .filter(n=> !isNaN(n));
+  const derivedNext = existingNums.length ? Math.max(...existingNums)+1 : 1;
+  const seq = Math.max(derivedNext, ORG.expSeq[key]||1);
+  return `${stub}${String(seq).padStart(3,'0')}`;
 }
 const CURRENCY_SYMBOLS = { INR:'₹', USD:'$', EUR:'€', GBP:'£', SGD:'S$' };
 const RCM_RATES = [0,5,12,18,28];
@@ -3736,7 +3741,7 @@ function renderExpenses(c, actions){
       const ms = !st || calcExpenseTotals(e).payStatus===st;
       return mq && mc && ms;
     });
-    list = list.slice().sort((a,b)=> (b.billDate||'').localeCompare(a.billDate||''));
+    list = list.slice().sort((a,b)=> (a.voucherNo||'').localeCompare(b.voucherNo||''));
     const wrap = document.getElementById('expTableWrap');
     if(!list.length){ wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No bills recorded yet.<div class="cta"><button class="btn" id="emptyNewExp">+ New Bill / Expense</button></div></div>'; document.getElementById('emptyNewExp').onclick=()=>openExpenseForm(); return; }
     wrap.innerHTML = `<table><thead><tr><th>Bill Log Ref</th><th>Date</th><th>Party</th><th>Description</th><th class="num-cell">Bill Amount</th><th>TDS</th><th class="num-cell">Net Payable</th><th>Status</th><th>Tally</th><th>Docs</th><th></th></tr></thead><tbody>
@@ -3751,7 +3756,7 @@ function renderExpenses(c, actions){
         <td style="max-width:220px;white-space:normal;">${esc(e.description||'—')}</td>
         <td class="num-cell">${e.currency&&e.currency!=='INR'?`${CURRENCY_SYMBOLS[e.currency]||''}${moneyPlain2(tot.amt)}`:money2(tot.amtINR)}</td>
         <td>${e.tdsApplicable?`<span class="pill accent">${esc((TDS_SECTION_BY_ID[e.tdsSectionId]||{}).oldCode||'')} ${e.tdsRate}%</span>`:'—'}</td>
-        <td class="num-cell">${money(tot.netPayable)}</td>
+        <td class="num-cell">${money2(tot.netPayable)}</td>
         <td>${expStatusPill(tot.payStatus)}</td>
         <td>${e.tallyVoucherNo?`<span class="pill good" title="#${esc(e.tallyVoucherNo)}">✓ Posted</span>`:'<span class="pill bad">Pending</span>'}</td>
         <td>
@@ -4412,6 +4417,9 @@ function renderSettings(c, actions){
       <div class="field" style="max-width:200px;"><label>Voucher Prefix</label><input type="text" maxlength="4" id="expPrefixField" value="${esc(ORG.expPrefix)}" style="text-transform:uppercase;"></div>
       <div class="btn-row"><button class="btn secondary sm" id="saveExpSettings">Save</button></div>
       <p class="hint" style="margin-top:10px;">Next voucher number: ${esc(ORG.expPrefix)}${currentFYShort()}${String(ORG.expSeq['EXP-'+currentFYShort()]||1).padStart(3,'0')}</p>
+      <div class="section-label" style="margin-top:14px;">Close Gaps in Bill Log Ref Numbers</div>
+      <p class="hint" style="margin:-4px 0 8px;">Renumbers every existing bill for this FY sequentially from 001, in their current date order — closes gaps left by deleted bills. Only do this if none of the current reference numbers have already been shared externally (e.g. with a vendor or auditor), since this changes them.</p>
+      <div class="btn-row"><button class="btn danger sm" id="renumberExpBtn">Renumber This FY's Bills (001, 002, 003…)</button></div>
     </div>
 
     <div class="card">
@@ -4693,6 +4701,30 @@ function renderSettings(c, actions){
     const v = document.getElementById('expPrefixField').value.trim().toUpperCase();
     if(v) ORG.expPrefix = v;
     await saveOrg(); toast('Bills & Expenses settings saved.'); renderSettings(c,actions);
+  };
+  const renumberBtn = document.getElementById('renumberExpBtn');
+  if(renumberBtn) renumberBtn.onclick = async ()=>{
+    const fy = currentFYShort();
+    const stub = ORG.expPrefix+fy;
+    const thisFyBills = EXPENSES.filter(e=> e.voucherNo && e.voucherNo.indexOf(stub)===0);
+    if(!thisFyBills.length){ toast('No bills found for this FY to renumber.'); return; }
+    const proceed = confirm(`This will renumber all ${thisFyBills.length} bill(s) for FY ${fy} sequentially from 001, closing any gaps. Their current reference numbers will change. Continue?`);
+    if(!proceed) return;
+    renumberBtn.disabled = true; renumberBtn.textContent = 'Renumbering…';
+    try{
+      // Sort by current voucher number (reflects original creation order) so the sequence
+      // stays chronological, just gapless.
+      thisFyBills.sort((a,b)=> a.voucherNo.localeCompare(b.voucherNo));
+      thisFyBills.forEach((e,i)=>{ e.voucherNo = `${stub}${String(i+1).padStart(3,'0')}`; tagRecord(e, false); });
+      ORG.expSeq['EXP-'+fy] = thisFyBills.length+1;
+      await saveExpenses(); await saveOrg();
+      toast(`Renumbered ${thisFyBills.length} bill(s) — now ${stub}001 through ${stub}${String(thisFyBills.length).padStart(3,'0')}.`);
+      renumberBtn.disabled = false; renumberBtn.textContent = 'Renumber This FY\'s Bills (001, 002, 003…)';
+      renderSettings(c,actions);
+    }catch(err){
+      renumberBtn.disabled = false; renumberBtn.textContent = 'Renumber This FY\'s Bills (001, 002, 003…)';
+      toast('Renumbering failed: '+(err.message||'unknown error'), true);
+    }
   };
 
   function drawCoa(){
