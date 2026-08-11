@@ -3714,11 +3714,23 @@ function taxComplianceData(year, month){
   const nextMonthDate = month===12 ? (year+1)+'-01-01' : year+'-'+String(month+1).padStart(2,'0')+'-01';
 
   // TDS to Deposit — Salary (Section 192, from Payslips) + everything else (from Bills &
-  // Expenses with TDS applicable), grouped by section for the breakdown.
+  // Expenses with TDS applicable), grouped by section for the breakdown, and also collected
+  // as individual line items for the detailed report table.
   const salarySlips = PAYSLIPS.filter(p=>p.period===period);
   const salaryTds = round2(salarySlips.reduce((s,p)=> s+(Number(p.tds)||0), 0));
   const bySection = {};
-  if(salaryTds>0){ bySection['SALARY'] = { label:'Salary', oldCode:'192', newCode:'392', amount:salaryTds, count:salarySlips.length, pending:salaryTds }; }
+  const lineItems = [];
+  if(salaryTds>0){
+    bySection['SALARY'] = { label:'Salary', oldCode:'192', newCode:'392', amount:salaryTds, count:salarySlips.length, pending:salaryTds };
+    salarySlips.forEach(p=>{
+      const emp = EMPLOYEES.find(x=>x.id===p.empId);
+      lineItems.push({
+        billAttached:false, date:p.generatedAt?p.generatedAt.slice(0,10):(period+'-01'),
+        companyName:p.empName, billAmount:(p.gross||0)+(p.bonus||0), tdsPct: p.gross ? round2((p.tds||0)/((p.gross||0)+(p.bonus||0))*100) : 0,
+        tdsAmount:p.tds||0, tdsCode:'192 → 392', pan: emp?emp.pan:'', remark:'Salary — '+p.period, section:'SALARY'
+      });
+    });
+  }
   EXPENSES.filter(e=> e.tdsApplicable && e.billDate>=monthStart && e.billDate<nextMonthDate).forEach(e=>{
     const tot = calcExpenseTotals(e);
     const secId = e.tdsSectionId || 'OTHER';
@@ -3727,6 +3739,13 @@ function taxComplianceData(year, month){
     bySection[secId].amount = round2(bySection[secId].amount + tot.tdsAmount);
     bySection[secId].count += 1;
     if(!e.tallyVoucherNo) bySection[secId].pending = round2(bySection[secId].pending + tot.tdsAmount);
+    const vendor = PARTIES.find(p=>p.id===e.vendorId);
+    lineItems.push({
+      billAttached: (e.billAttachments||e.attachments||[]).length>0, date:e.billDate,
+      companyName:e.vendorName||'—', billAmount:tot.amtINR, tdsPct:Number(e.tdsRate)||0,
+      tdsAmount:tot.tdsAmount, tdsCode: secMeta?`${secMeta.oldCode} → ${secMeta.newCode}`:'—',
+      pan: vendor?vendor.panNumber:'', remark:e.description||e.voucherNo, section:secId
+    });
   });
   const totalTdsToDeposit = round2(Object.values(bySection).reduce((s,x)=> s+x.amount, 0));
 
@@ -3751,7 +3770,7 @@ function taxComplianceData(year, month){
   const today = new Date();
   const overdueDays = Math.floor((today - deadline) / 86400000);
 
-  return { period, salaryTds, bySection, totalTdsToDeposit, tdsReceivable, receivableCount:receivableTxns.length,
+  return { period, salaryTds, bySection, lineItems, totalTdsToDeposit, tdsReceivable, receivableCount:receivableTxns.length,
     gstInputExpenses, expensesCount:expensesThisMonth.length, gstOutput, gstPayable, deadline, overdueDays };
 }
 function renderTaxCompliance(c, actions){
@@ -3806,6 +3825,30 @@ function renderTaxCompliance(c, actions){
         </div>`).join('') : `<div style="grid-column:1/-1;color:rgba(255,255,255,.85);padding:8px;">No TDS deducted this month.</div>`}
       </div>
     </div>
+    <div class="card" style="margin-top:14px;">
+      <h2>TDS Deduction Detail — ${esc(monthLong)} ${taxComplianceYear}</h2>
+      <p style="color:var(--muted);font-size:13px;">Every bill or payslip with TDS this month, by section.</p>
+      ${Object.keys(d.bySection).length ? Object.entries(d.bySection).map(([secId,s])=>{
+        const rows = d.lineItems.filter(li=>li.section===secId);
+        return `
+        <div class="section-label" style="margin-top:14px;">${esc(s.oldCode)} → ${esc(s.newCode)} · ${esc(s.label)}</div>
+        <div style="overflow-x:auto;">
+        <table><thead><tr><th>Bill Attached</th><th>Date</th><th>Company Name</th><th class="num-cell">Bill Amount</th><th class="num-cell">TDS%</th><th class="num-cell">TDS Amount</th><th>TDS Code</th><th>PAN No</th><th>Remark</th></tr></thead><tbody>
+          ${rows.map(li=>`<tr>
+            <td>${li.billAttached?'<span class="pill good">✓</span>':'<span class="pill bad">✕</span>'}</td>
+            <td>${esc(li.date||'—')}</td>
+            <td>${esc(li.companyName)}</td>
+            <td class="num-cell">${money2(li.billAmount)}</td>
+            <td class="num-cell">${li.tdsPct}%</td>
+            <td class="num-cell">${money2(li.tdsAmount)}</td>
+            <td>${esc(li.tdsCode)}</td>
+            <td>${esc(li.pan||'—')}</td>
+            <td>${esc(li.remark||'—')}</td>
+          </tr>`).join('')}
+        </tbody></table>
+        </div>`;
+      }).join('') : `<div class="empty">No TDS deducted this month.</div>`}
+    </div>
     <div class="card" style="margin-top:14px;background:linear-gradient(135deg,#B91C1C,#7F1D1D);color:#fff;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div>
         <h2 style="color:#fff;margin:0;">🇮🇳 TDS Deducted — ${esc(monthLabel)} ${taxComplianceYear}</h2>
@@ -3814,6 +3857,16 @@ function renderTaxCompliance(c, actions){
       <div style="text-align:right;">
         <div style="font-size:22px;font-weight:800;">${money(d.totalTdsToDeposit)}</div>
         ${d.overdueDays>0 ? `<div style="font-size:12px;">🔴 OVERDUE by ${d.overdueDays} day${d.overdueDays===1?'':'s'}</div>` : (d.totalTdsToDeposit>0 ? `<div style="font-size:12px;">Due ${esc(deadlineLabel)}</div>` : '')}
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px;background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div>
+        <h2 style="color:#fff;margin:0;">🧾 GST Reconciliation — ${esc(monthLabel)} ${taxComplianceYear}</h2>
+        <p style="color:rgba(255,255,255,.85);font-size:12.5px;margin:2px 0 0;">Output ${money(d.gstOutput)} − Input Credit ${money(d.gstInputExpenses)} — GSTR-3B typically due by the 20th of next month</p>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:22px;font-weight:800;">${money(d.gstPayable)}</div>
+        <div style="font-size:12px;">${d.gstPayable>=0?'Payable':'Carried forward as credit'}</div>
       </div>
     </div>
   `;
@@ -3845,6 +3898,10 @@ function printTaxComplianceReport(kind, d, monthLong){
           <tr class="totrow"><td colspan="4">TOTAL TDS TO DEPOSIT</td><td class="amtcell" colspan="2">${money2(d.totalTdsToDeposit)}</td></tr>
         </table>
         <p style="font-size:12px;margin-top:10px;">Deposit deadline: <b>${d.deadline.toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'})}</b>${d.overdueDays>0?` — <span style="color:#DC2626;">OVERDUE by ${d.overdueDays} day(s)</span>`:''}</p>
+        <table class="pstable items-table" style="margin-top:12px;">
+          <tr class="earnhead"><td>BILL ATTACHED</td><td>DATE</td><td>COMPANY NAME</td><td class="amtcell">BILL AMOUNT</td><td>TDS%</td><td class="amtcell">TDS AMOUNT</td><td>TDS CODE</td><td>PAN NO</td><td>REMARK</td></tr>
+          ${d.lineItems.map(li=>`<tr><td class="val">${li.billAttached?'Yes':'No'}</td><td class="val">${esc(li.date||'—')}</td><td class="val">${esc(li.companyName)}</td><td class="val amtcell">${money2(li.billAmount)}</td><td class="val">${li.tdsPct}%</td><td class="val amtcell">${money2(li.tdsAmount)}</td><td class="val">${esc(li.tdsCode)}</td><td class="val">${esc(li.pan||'—')}</td><td class="val">${esc(li.remark||'—')}</td></tr>`).join('')}
+        </table>
         ` : `
         <table class="pstable">
           <tr><td class="lbl">GST OUTPUT (Sales/Invoices)</td><td class="val amtcell">${money2(d.gstOutput)}</td></tr>
@@ -3868,6 +3925,9 @@ function exportTaxComplianceCsv(d, monthLong){
   rows.push(['GST Output', '', '', '', d.gstOutput, '']);
   rows.push(['GST Input Credit', '', '', '', d.gstInputExpenses, '']);
   rows.push(['GST Payable', '', '', '', d.gstPayable, '']);
+  rows.push([]);
+  rows.push(['Bill Attached','Date','Company Name','Bill Amount','TDS%','TDS Amount','TDS Code','PAN No','Remark']);
+  d.lineItems.forEach(li=> rows.push([li.billAttached?'Yes':'No', li.date, li.companyName, li.billAmount, li.tdsPct, li.tdsAmount, li.tdsCode, li.pan, li.remark]));
   const csv = rows.map(r=> r.map(v=> typeof v==='string' && (v.includes(',')||v.includes('"')) ? '"'+v.replace(/"/g,'""')+'"' : v).join(',')).join('\n');
   const blob = new Blob([csv], {type:'text/csv'});
   const url = URL.createObjectURL(blob);
@@ -3897,8 +3957,9 @@ function renderExpenses(c, actions){
     <div class="hint" style="margin:-6px 0 14px;">📋 ${tallyPendingCount} bill${tallyPendingCount===1?'':'s'} not yet posted to Tally</div>
     <div class="card">
       <h2>Bills &amp; Expenses</h2>
-      <div class="grid cols-3" style="margin-top:10px;">
+      <div class="grid cols-4" style="margin-top:10px;">
         <div class="field"><label>Search</label><input type="text" id="expSearch" placeholder="Voucher no., vendor, bill no., description..."></div>
+        <div class="field"><label>Month</label><select id="expMonthFilter"><option value="">All Months</option>${[...new Set(EXPENSES.map(e=>(e.billDate||'').slice(0,7)).filter(Boolean))].sort().reverse().map(ym=>{ const [y,m]=ym.split('-'); const label = new Date(Number(y),Number(m)-1,1).toLocaleString('en-IN',{month:'long',year:'numeric'}); return `<option value="${ym}">${label}</option>`; }).join('')}</select></div>
         <div class="field"><label>Category</label><select id="expCatFilter"><option value="">All Categories</option>${EXPENSE_CATEGORIES.map(c=>`<option>${c}</option>`).join('')}</select></div>
         <div class="field"><label>Status</label><select id="expStatusFilter"><option value="">All Statuses</option><option>Pending</option><option>Partial</option><option>Paid</option></select></div>
       </div>
@@ -3913,13 +3974,15 @@ function renderExpenses(c, actions){
   }
   function draw(){
     const q = (document.getElementById('expSearch').value||'').toLowerCase();
+    const month = document.getElementById('expMonthFilter').value;
     const cat = document.getElementById('expCatFilter').value;
     const st = document.getElementById('expStatusFilter').value;
     let list = EXPENSES.filter(e=>{
       const mq = !q || [e.voucherNo,e.vendorName,e.employeeName,e.billNo,e.description,e.statutoryType,e.fromBankName,e.toBankName].some(v=>(v||'').toLowerCase().includes(q));
+      const mm = !month || (e.billDate||'').slice(0,7)===month;
       const mc = !cat || e.category===cat;
       const ms = !st || calcExpenseTotals(e).payStatus===st;
-      return mq && mc && ms;
+      return mq && mm && mc && ms;
     });
     list = list.slice().sort((a,b)=> (a.voucherNo||'').localeCompare(b.voucherNo||''));
     const wrap = document.getElementById('expTableWrap');
@@ -3955,7 +4018,7 @@ function renderExpenses(c, actions){
     wrap.querySelectorAll('[data-edit]').forEach(b=> b.onclick=()=>openExpenseForm(b.dataset.edit));
     wrap.querySelectorAll('[data-del]').forEach(b=> b.onclick=()=>deleteExpense(b.dataset.del));
   }
-  ['expSearch','expCatFilter','expStatusFilter'].forEach(id=> document.getElementById(id).addEventListener('input', draw));
+  ['expSearch','expMonthFilter','expCatFilter','expStatusFilter'].forEach(id=> document.getElementById(id).addEventListener('input', draw));
   draw();
 }
 
