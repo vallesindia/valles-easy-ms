@@ -223,6 +223,7 @@
       <button class="nav-item" data-tab="transactions"><span class="ic">📑</span>Transactions</button>
       <button class="nav-item" data-tab="staff"><span class="ic">👥</span>Staff<span class="badge" id="compBadge" style="display:none;">0</span></button>
       <button class="nav-item" data-tab="expenses"><span class="ic">🧾</span>Bills &amp; Expenses</button>
+      <button class="nav-item" data-tab="taxcompliance"><span class="ic">📊</span>Tax Compliance</button>
       <button class="nav-item" data-tab="parties"><span class="ic">🤝</span>Parties</button>
       <button class="nav-item" data-tab="documents"><span class="ic">📄</span>Documents<span class="badge" id="docBadge" style="display:none;">0</span></button>
       <button class="nav-item" data-tab="settings"><span class="ic">🔒</span>Settings</button>
@@ -600,6 +601,7 @@ function setTab(tab){
     parties:['Parties','Clients and sub-contractors directory'],
     transactions:['Transactions','Enquiries, quotations, purchase orders, invoices, credit & delivery notes'],
     expenses:['Bills & Expenses','Vendor bills, GST and TDS tracking'],
+    taxcompliance:['Tax Compliance','TDS liability, GST input/output reconciliation and filing alerts'],
     documents:['Documents','Registrations, licences, certificates and insurance'],
     settings:['Settings','Company details, backup and restore — admin only']
   };
@@ -637,6 +639,7 @@ function render(){
   if(activeTab==='parties') return renderParties(c, actions);
   if(activeTab==='transactions') return renderTransactions(c, actions);
   if(activeTab==='expenses') return renderExpenses(c, actions);
+  if(activeTab==='taxcompliance') return renderTaxCompliance(c, actions);
   if(activeTab==='documents') return renderDocuments(c, actions);
   if(activeTab==='settings') return renderSettings(c, actions);
 }
@@ -3039,7 +3042,9 @@ function openTxnForm(txnId, prefill){
       <div class="section-label" style="margin-top:14px;">GST</div>
       <div class="grid cols-3">
         <div class="field"><label>GST Mode</label><select name="gstMode" id="txnGstMode"><option value="None" ${t.gstMode==='None'?'selected':''}>None</option><option value="Intra" ${t.gstMode==='Intra'?'selected':''}>Intra-state (CGST + SGST)</option><option value="Inter" ${t.gstMode==='Inter'?'selected':''}>Inter-state (IGST)</option></select></div>
+        <div class="field"><label>TDS Deducted by Client (₹, optional)</label><input type="number" min="0" step="0.01" name="tdsDeductedByClient" id="txnTdsReceivable" value="${t.tdsDeductedByClient||0}"></div>
       </div>
+      <p class="hint" style="margin:-6px 0 8px;">For Invoices: if the client withholds TDS on this payment (Form 26AS credit to you), record it here — feeds the "TDS Receivable" figure in Tax Compliance.</p>
       <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
         <span>Line Items</span>
       </div>
@@ -3246,7 +3251,7 @@ async function submitTxnForm(ev, isEdit, t){
     partyId: fd.get('partyId'), partyName: party?party.partyName:'',
     txnDate: fd.get('txnDate'), dueDate: fd.get('dueDate'),
     referenceType: fd.get('referenceType'), reference: fd.get('reference').trim(), subject: fd.get('subject').trim(),
-    status: fd.get('status'), gstMode: fd.get('gstMode'),
+    status: fd.get('status'), gstMode: fd.get('gstMode'), tdsDeductedByClient: Number(fd.get('tdsDeductedByClient'))||0,
     currency: fd.get('currency')||'INR', exchRate: Number(fd.get('exchRate'))||1,
     poNumber: fd.get('poNumber')||'', poDate: fd.get('poDate')||'', poTerms: fd.get('poTerms')||'',
     panNumber: fd.get('panNumber')||'', supplyDateTime: fd.get('supplyDateTime')||'', placeOfSupply: fd.get('placeOfSupply')||'', vehicleNo: fd.get('vehicleNo')||'',
@@ -3700,6 +3705,176 @@ function expStatusPill(status){
   return `<span class="pill ${cls}">${esc(status)}</span>`;
 }
 
+/* ============================= TAX COMPLIANCE ============================= */
+let taxComplianceMonth = new Date().getMonth()+1;
+let taxComplianceYear = new Date().getFullYear();
+function taxComplianceData(year, month){
+  const period = year+'-'+String(month).padStart(2,'0');
+  const monthStart = period+'-01';
+  const nextMonthDate = month===12 ? (year+1)+'-01-01' : year+'-'+String(month+1).padStart(2,'0')+'-01';
+
+  // TDS to Deposit — Salary (Section 192, from Payslips) + everything else (from Bills &
+  // Expenses with TDS applicable), grouped by section for the breakdown.
+  const salarySlips = PAYSLIPS.filter(p=>p.period===period);
+  const salaryTds = round2(salarySlips.reduce((s,p)=> s+(Number(p.tds)||0), 0));
+  const bySection = {};
+  if(salaryTds>0){ bySection['SALARY'] = { label:'Salary', oldCode:'192', newCode:'392', amount:salaryTds, count:salarySlips.length, pending:salaryTds }; }
+  EXPENSES.filter(e=> e.tdsApplicable && e.billDate>=monthStart && e.billDate<nextMonthDate).forEach(e=>{
+    const tot = calcExpenseTotals(e);
+    const secId = e.tdsSectionId || 'OTHER';
+    const secMeta = TDS_SECTION_BY_ID[secId];
+    if(!bySection[secId]) bySection[secId] = { label: secMeta?secMeta.description:'Other', oldCode: secMeta?secMeta.oldCode:'—', newCode: secMeta?secMeta.newCode:'—', amount:0, count:0, pending:0 };
+    bySection[secId].amount = round2(bySection[secId].amount + tot.tdsAmount);
+    bySection[secId].count += 1;
+    if(!e.tallyVoucherNo) bySection[secId].pending = round2(bySection[secId].pending + tot.tdsAmount);
+  });
+  const totalTdsToDeposit = round2(Object.values(bySection).reduce((s,x)=> s+x.amount, 0));
+
+  // TDS Receivable — from clients withholding TDS on Invoice transactions.
+  const receivableTxns = TRANSACTIONS.filter(t=> t.txnCategory==='INVOICE' && t.txnDate>=monthStart && t.txnDate<nextMonthDate && Number(t.tdsDeductedByClient)>0);
+  const tdsReceivable = round2(receivableTxns.reduce((s,t)=> s+Number(t.tdsDeductedByClient||0), 0));
+
+  // GST Input Credit — from Bills & Expenses this month (includes RCM-self-assessed GST,
+  // since that's also claimable as input credit once self-paid).
+  const expensesThisMonth = EXPENSES.filter(e=> e.billDate>=monthStart && e.billDate<nextMonthDate);
+  const gstInputExpenses = round2(expensesThisMonth.reduce((s,e)=> s+calcExpenseTotals(e).gstTotal, 0));
+
+  // GST Output — from Invoice transactions this month.
+  const invoiceTxns = TRANSACTIONS.filter(t=> t.txnCategory==='INVOICE' && t.txnDate>=monthStart && t.txnDate<nextMonthDate);
+  const gstOutput = round2(invoiceTxns.reduce((s,t)=> s+calcTxnTotals(t).taxAmountINR, 0));
+  const gstPayable = round2(gstOutput - gstInputExpenses);
+
+  // TDS deposit deadline: 7th of the month AFTER the deduction month.
+  const deadlineYear = month===12 ? year+1 : year;
+  const deadlineMonth = month===12 ? 1 : month+1;
+  const deadline = new Date(deadlineYear, deadlineMonth-1, 7);
+  const today = new Date();
+  const overdueDays = Math.floor((today - deadline) / 86400000);
+
+  return { period, salaryTds, bySection, totalTdsToDeposit, tdsReceivable, receivableCount:receivableTxns.length,
+    gstInputExpenses, expensesCount:expensesThisMonth.length, gstOutput, gstPayable, deadline, overdueDays };
+}
+function renderTaxCompliance(c, actions){
+  actions.innerHTML = '';
+  const d = taxComplianceData(taxComplianceYear, taxComplianceMonth);
+  const monthLabel = new Date(taxComplianceYear, taxComplianceMonth-1, 1).toLocaleString('en-IN',{month:'short'});
+  const monthLong = new Date(taxComplianceYear, taxComplianceMonth-1, 1).toLocaleString('en-IN',{month:'long'});
+  const deadlineLabel = d.deadline.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
+  c.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
+      <div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <select id="tcMonth" style="padding:8px 10px;border:1px solid var(--rule);border-radius:8px;">${Array.from({length:12},(_,i)=>i+1).map(m=>`<option value="${m}" ${m===taxComplianceMonth?'selected':''}>${new Date(2000,m-1,1).toLocaleString('en-IN',{month:'short'})}</option>`).join('')}</select>
+        <select id="tcYear" style="padding:8px 10px;border:1px solid var(--rule);border-radius:8px;">${Array.from({length:6},(_,i)=> taxComplianceYear-3+i).map(y=>`<option value="${y}" ${y===taxComplianceYear?'selected':''}>${y}</option>`).join('')}</select>
+        <button class="btn danger sm" id="tcTdsPdf">📄 TDS PDF</button>
+        <button class="btn sm" id="tcGstPdf">📄 GST PDF</button>
+        <button class="btn secondary sm" id="tcGstCsv">📊 GST CSV</button>
+      </div>
+    </div>
+    <div class="grid cols-4" style="gap:14px;">
+      <div class="stat" style="background:linear-gradient(135deg,#DC2626,#991B1B);">
+        <div style="font-size:12px;opacity:.85;">TDS to Deposit (Expenses)</div>
+        <div style="font-size:26px;font-weight:800;margin:4px 0;">${money(d.totalTdsToDeposit)}</div>
+        <div style="font-size:11.5px;opacity:.85;">Due ${esc(deadlineLabel)}</div>
+      </div>
+      <div class="stat" style="background:linear-gradient(135deg,#2563EB,#1D4ED8);">
+        <div style="font-size:12px;opacity:.85;">TDS Receivable (from Clients)</div>
+        <div style="font-size:26px;font-weight:800;margin:4px 0;">${money(d.tdsReceivable)}</div>
+        <div style="font-size:11.5px;opacity:.85;">${d.receivableCount} invoice(s)</div>
+      </div>
+      <div class="stat" style="background:linear-gradient(135deg,#EA580C,#C2410C);">
+        <div style="font-size:12px;opacity:.85;">GST Input Credit (Expenses)</div>
+        <div style="font-size:26px;font-weight:800;margin:4px 0;">${money(d.gstInputExpenses)}</div>
+        <div style="font-size:11.5px;opacity:.85;">${d.expensesCount} bill(s)</div>
+      </div>
+      <div class="stat" style="background:linear-gradient(135deg,#7C3AED,#6D28D9);">
+        <div style="font-size:12px;opacity:.85;">GST Payable</div>
+        <div style="font-size:26px;font-weight:800;margin:4px 0;">${money(d.gstPayable)}</div>
+        <div style="font-size:11.5px;opacity:.85;">Output ${money(d.gstOutput)} − Input ${money(d.gstInputExpenses)}</div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:18px;background:linear-gradient(135deg,#DC2626,#991B1B);color:#fff;">
+      <h2 style="color:#fff;">📊 TDS Section-wise Breakdown — ${esc(monthLong)} ${taxComplianceYear}</h2>
+      <p style="color:rgba(255,255,255,.85);font-size:13px;">Per-section liability for matching against challan deposits</p>
+      <div class="grid cols-4" style="gap:12px;margin-top:8px;">
+        ${Object.keys(d.bySection).length ? Object.entries(d.bySection).map(([id,s])=>`
+        <div style="background:#fff;color:var(--ink);border-radius:10px;padding:12px;">
+          <div style="font-size:11px;font-weight:700;color:var(--bad);">${esc(s.oldCode)} → ${esc(s.newCode)}</div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">${esc(s.label)}</div>
+          <div style="font-size:18px;font-weight:800;color:var(--bad);">${money(s.amount)}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px;">${s.count} entr${s.count===1?'y':'ies'} · Pending: <span style="color:${s.pending>0?'var(--bad)':'var(--good)'};font-weight:700;">${money(s.pending)}</span></div>
+        </div>`).join('') : `<div style="grid-column:1/-1;color:rgba(255,255,255,.85);padding:8px;">No TDS deducted this month.</div>`}
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px;background:linear-gradient(135deg,#B91C1C,#7F1D1D);color:#fff;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div>
+        <h2 style="color:#fff;margin:0;">🇮🇳 TDS Deducted — ${esc(monthLabel)} ${taxComplianceYear}</h2>
+        <p style="color:rgba(255,255,255,.85);font-size:12.5px;margin:2px 0 0;">Tax deducted from vendor/contractor/salary payments — deposit by 7th of next month</p>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:22px;font-weight:800;">${money(d.totalTdsToDeposit)}</div>
+        ${d.overdueDays>0 ? `<div style="font-size:12px;">🔴 OVERDUE by ${d.overdueDays} day${d.overdueDays===1?'':'s'}</div>` : (d.totalTdsToDeposit>0 ? `<div style="font-size:12px;">Due ${esc(deadlineLabel)}</div>` : '')}
+      </div>
+    </div>
+  `;
+  document.getElementById('tcMonth').onchange = (e)=>{ taxComplianceMonth = Number(e.target.value); renderTaxCompliance(c, actions); };
+  document.getElementById('tcYear').onchange = (e)=>{ taxComplianceYear = Number(e.target.value); renderTaxCompliance(c, actions); };
+  document.getElementById('tcTdsPdf').onclick = ()=> printTaxComplianceReport('tds', d, monthLong);
+  document.getElementById('tcGstPdf').onclick = ()=> printTaxComplianceReport('gst', d, monthLong);
+  document.getElementById('tcGstCsv').onclick = ()=> exportTaxComplianceCsv(d, monthLong);
+}
+function printTaxComplianceReport(kind, d, monthLong){
+  const isTds = kind==='tds';
+  const rows = isTds
+    ? Object.values(d.bySection).map(s=>`<tr><td>${esc(s.oldCode)} → ${esc(s.newCode)}</td><td>${esc(s.label)}</td><td class="num-cell">${s.count}</td><td class="num-cell">${money2(s.amount)}</td><td class="num-cell">${money2(s.pending)}</td></tr>`).join('')
+    : '';
+  const html = `
+    <div class="modal-head no-print"><h3>${isTds?'TDS':'GST'} Report — ${esc(monthLong)} ${taxComplianceYear}</h3><button class="modal-close" id="mClose">✕</button></div>
+    <div id="printArea">
+      <div class="payslip">
+        <div class="payslip-top">
+          <div class="logo">${ORG.logo?`<img src="${ORG.logo}">`:(ORG.companyName||'C').charAt(0).toUpperCase()}</div>
+          <div class="conameblock"><div class="coname">${esc((ORG.companyName||'YOUR COMPANY').toUpperCase())}</div></div>
+          <div style="width:66px;"></div>
+        </div>
+        <div class="payslip-title">${isTds?'TDS LIABILITY REPORT':'GST RECONCILIATION REPORT'} — ${esc(monthLong).toUpperCase()} ${taxComplianceYear}</div>
+        ${isTds ? `
+        <table class="pstable items-table" style="margin-top:8px;">
+          <tr class="earnhead"><td>SECTION (OLD)</td><td>SECTION (NEW)</td><td>DESCRIPTION</td><td>ENTRIES</td><td class="amtcell">AMOUNT</td><td class="amtcell">PENDING</td></tr>
+          ${Object.values(d.bySection).map(s=>`<tr><td class="val">${esc(s.oldCode)}</td><td class="val">${esc(s.newCode)}</td><td class="val">${esc(s.label)}</td><td class="val">${s.count}</td><td class="val amtcell">${money2(s.amount)}</td><td class="val amtcell">${money2(s.pending)}</td></tr>`).join('')}
+          <tr class="totrow"><td colspan="4">TOTAL TDS TO DEPOSIT</td><td class="amtcell" colspan="2">${money2(d.totalTdsToDeposit)}</td></tr>
+        </table>
+        <p style="font-size:12px;margin-top:10px;">Deposit deadline: <b>${d.deadline.toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'})}</b>${d.overdueDays>0?` — <span style="color:#DC2626;">OVERDUE by ${d.overdueDays} day(s)</span>`:''}</p>
+        ` : `
+        <table class="pstable">
+          <tr><td class="lbl">GST OUTPUT (Sales/Invoices)</td><td class="val amtcell">${money2(d.gstOutput)}</td></tr>
+          <tr><td class="lbl">GST INPUT CREDIT (Expenses)</td><td class="val amtcell">${money2(d.gstInputExpenses)}</td></tr>
+          <tr class="totrow"><td>GST PAYABLE</td><td class="amtcell">${money2(d.gstPayable)}</td></tr>
+        </table>
+        `}
+        <div class="regime-note">Figures are drawn from Transactions and Bills & Expenses recorded for this period as of the report date — reconcile against GSTR-2B and actual challans before filing.</div>
+      </div>
+    </div>
+    <div class="btn-row no-print" style="margin-top:16px;"><button class="btn" id="printBtn">🖨️ Print / Save as PDF</button><button class="btn secondary" id="mCancel">Close</button></div>
+  `;
+  openModal(html, 'xwide');
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('printBtn').onclick = ()=> window.print();
+}
+function exportTaxComplianceCsv(d, monthLong){
+  const rows = [['Section (Old)','Section (New)','Description','Entries','Amount','Pending']];
+  Object.values(d.bySection).forEach(s=> rows.push([s.oldCode, s.newCode, s.label, s.count, s.amount, s.pending]));
+  rows.push([]);
+  rows.push(['GST Output', '', '', '', d.gstOutput, '']);
+  rows.push(['GST Input Credit', '', '', '', d.gstInputExpenses, '']);
+  rows.push(['GST Payable', '', '', '', d.gstPayable, '']);
+  const csv = rows.map(r=> r.map(v=> typeof v==='string' && (v.includes(',')||v.includes('"')) ? '"'+v.replace(/"/g,'""')+'"' : v).join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = `TaxCompliance_${monthLong}_${taxComplianceYear}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=> URL.revokeObjectURL(url), 5000);
+}
 function renderExpenses(c, actions){
   actions.innerHTML = `<button class="btn" id="newExpBtn">+ New Bill / Expense</button>`;
   actions.querySelector('#newExpBtn').onclick = ()=> openExpenseForm();
