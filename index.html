@@ -3816,16 +3816,6 @@ function renderTaxCompliance(c, actions){
         ${d.overdueDays>0 ? `<div style="font-size:12px;">🔴 OVERDUE by ${d.overdueDays} day${d.overdueDays===1?'':'s'}</div>` : (d.totalTdsToDeposit>0 ? `<div style="font-size:12px;">Due ${esc(deadlineLabel)}</div>` : '')}
       </div>
     </div>
-    <div class="card" style="margin-top:14px;background:linear-gradient(135deg,#7C3AED,#DB2777);color:#fff;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-      <div>
-        <h2 style="color:#fff;margin:0;">🧾 GST Reconciliation — ${esc(monthLabel)} ${taxComplianceYear}</h2>
-        <p style="color:rgba(255,255,255,.85);font-size:12.5px;margin:2px 0 0;">Output ${money(d.gstOutput)} − Input Credit ${money(d.gstInputExpenses)} — GSTR-3B typically due by the 20th of next month</p>
-      </div>
-      <div style="text-align:right;">
-        <div style="font-size:22px;font-weight:800;">${money(d.gstPayable)}</div>
-        <div style="font-size:12px;">${d.gstPayable>=0?'Payable':'Carried forward as credit'}</div>
-      </div>
-    </div>
   `;
   document.getElementById('tcMonth').onchange = (e)=>{ taxComplianceMonth = Number(e.target.value); renderTaxCompliance(c, actions); };
   document.getElementById('tcYear').onchange = (e)=>{ taxComplianceYear = Number(e.target.value); renderTaxCompliance(c, actions); };
