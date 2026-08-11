@@ -4137,7 +4137,7 @@ function openExpenseForm(expId){
         <div class="field" style="grid-column:span 2;"><label>TDS Section</label><select name="tdsSectionId" id="expTdsSection">
           <option value="">— Select Section —</option>${TDS_SECTIONS.map(s=>`<option value="${s.id}" ${e.tdsSectionId===s.id?'selected':''}>${esc(tdsSectionLabel(s))}</option>`).join('')}
         </select></div>
-        <div class="field"><label>TDS Rate %</label><input type="number" min="0" step="0.01" name="tdsRate" id="expTdsRate" value="${e.tdsRate}"></div>
+        <div class="field"><label>TDS Rate %</label><input type="number" min="0" step="any" name="tdsRate" id="expTdsRate" value="${e.tdsRate}"></div>
         <input type="hidden" name="tdsFlatAmount" id="expTdsFlatAmount" value="${e.tdsFlatAmount!=null?e.tdsFlatAmount:''}">
       </div>
       </div>
