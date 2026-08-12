@@ -4139,6 +4139,7 @@ function openExpenseForm(expId){
         </select></div>
         <div class="field"><label>TDS Rate %</label><input type="number" min="0" step="any" name="tdsRate" id="expTdsRate" value="${e.tdsRate}"></div>
         <input type="hidden" name="tdsFlatAmount" id="expTdsFlatAmount" value="${e.tdsFlatAmount!=null?e.tdsFlatAmount:''}">
+        ${isEdit && e.billType==='SALARY' && e.tdsFlatAmount==null ? `<div class="field" style="grid-column:1/-1;"><div class="hint" style="color:var(--bad);margin-bottom:6px;">⚠ This bill predates a TDS-precision fix and may be showing a rounded figure, not the exact payslip amount.</div><button type="button" class="btn secondary sm" id="expRefreshTds">🔄 Refresh Exact TDS from Payslip</button></div>` : ''}
       </div>
       </div>
       <div id="expDeductionsSection" style="background:#FAF5FF;border:1px solid #E9D5FF;border-radius:8px;padding:10px 12px;margin:12px 0;">
@@ -4275,6 +4276,8 @@ function openExpenseForm(expId){
   document.getElementById('expEmployeeSel').addEventListener('change', autofillFromPayslip);
   document.getElementById('expSalaryMonth').addEventListener('change', autofillFromPayslip);
   if(billTypeSel.value==='SALARY') autofillFromPayslip();
+  const refreshTdsBtn = document.getElementById('expRefreshTds');
+  if(refreshTdsBtn) refreshTdsBtn.onclick = ()=>{ autofillFromPayslip(); toast('Refreshed from the current payslip — review below, then Save Bill to apply.'); };
 
   function readForm(){
     const bt = currentBillType();
@@ -4669,6 +4672,9 @@ function renderSettings(c, actions){
       <div class="section-label" style="margin-top:14px;">Close Gaps in Bill Log Ref Numbers</div>
       <p class="hint" style="margin:-4px 0 8px;">Renumbers every existing bill for this FY sequentially from 001, in their current date order — closes gaps left by deleted bills. Only do this if none of the current reference numbers have already been shared externally (e.g. with a vendor or auditor), since this changes them.</p>
       <div class="btn-row"><button class="btn danger sm" id="renumberExpBtn">Renumber This FY's Bills (001, 002, 003…)</button></div>
+      <div class="section-label" style="margin-top:14px;">Fix TDS Precision on Existing Salary Bills</div>
+      <p class="hint" style="margin:-4px 0 8px;">Salary bills auto-filled before the TDS-precision fix stored a rounded rate instead of the payslip's exact amount, which can leave Net Payable off by a few paise. This re-syncs every Salary bill still missing the exact figure against its matching payslip — bills without a matching payslip are left untouched.</p>
+      <div class="btn-row"><button class="btn secondary sm" id="fixSalaryTdsBtn">🔄 Fix TDS Precision on All Salary Bills</button></div>
     </div>
 
     <div class="card">
@@ -4974,6 +4980,25 @@ function renderSettings(c, actions){
       renumberBtn.disabled = false; renumberBtn.textContent = 'Renumber This FY\'s Bills (001, 002, 003…)';
       toast('Renumbering failed: '+(err.message||'unknown error'), true);
     }
+  };
+  const fixSalaryTdsBtn = document.getElementById('fixSalaryTdsBtn');
+  if(fixSalaryTdsBtn) fixSalaryTdsBtn.onclick = async ()=>{
+    const affected = EXPENSES.filter(e=> e.billType==='SALARY' && e.tdsFlatAmount==null && e.employeeId && e.salaryMonth);
+    if(!affected.length){ toast('Nothing to fix — every Salary bill already has an exact TDS figure on record.'); return; }
+    fixSalaryTdsBtn.disabled = true; fixSalaryTdsBtn.textContent = 'Fixing…';
+    let fixed = 0, noMatch = 0;
+    affected.forEach(e=>{
+      const payslip = PAYSLIPS.find(p=> p.empId===e.employeeId && p.period===e.salaryMonth);
+      if(!payslip){ noMatch++; return; }
+      e.tdsFlatAmount = payslip.tds;
+      e.tdsRate = payslip.gross ? Number((payslip.tds/payslip.gross*100).toFixed(4)) : e.tdsRate;
+      tagRecord(e, false);
+      fixed++;
+    });
+    await saveExpenses();
+    fixSalaryTdsBtn.disabled = false; fixSalaryTdsBtn.textContent = '🔄 Fix TDS Precision on All Salary Bills';
+    toast(`Fixed ${fixed} bill(s)${noMatch?`, ${noMatch} skipped — no matching payslip found`:''}.`, noMatch>0);
+    renderSettings(c,actions);
   };
 
   function drawCoa(){
