@@ -4105,7 +4105,7 @@ function renderExpenses(c, actions){
       <div id="expTableWrap"></div>
     </div>
   `;
-  const BILL_TYPE_LABELS = { SUPPLIER:'Supplier', STATUTORY:'Statutory', SALARY:'Salary', INTERBANK:'Inter-Bank' };
+  const BILL_TYPE_LABELS = { SUPPLIER:'Supplier', TELEPHONE:'Telephone Expenses', VEHICLE:'Vehicle', STATUTORY:'Statutory', SALARY:'Salary', INTERBANK:'Inter-Bank' };
   function expPartyLabel(e){
     if(e.billType==='SALARY') return e.employeeName || '—';
     if(e.billType==='INTERBANK') return `${e.fromBankName||'?'} → ${e.toBankName||'?'}`;
@@ -4205,6 +4205,8 @@ function openExpenseForm(expId){
       <div class="grid cols-3">
         <div class="field"><label>Bill Type</label><select name="billType" id="expBillType" ${isEdit?'disabled':''}>
           <option value="SUPPLIER" ${e.billType==='SUPPLIER'?'selected':''}>Bills from Supplier / Subcontractor</option>
+          <option value="TELEPHONE" ${e.billType==='TELEPHONE'?'selected':''}>Telephone Expenses</option>
+          <option value="VEHICLE" ${e.billType==='VEHICLE'?'selected':''}>Vehicle</option>
           <option value="STATUTORY" ${e.billType==='STATUTORY'?'selected':''}>Statutory Payment</option>
           <option value="SALARY" ${e.billType==='SALARY'?'selected':''}>Salary or Wages</option>
           <option value="INTERBANK" ${e.billType==='INTERBANK'?'selected':''}>Inter-Bank Transfer</option>
@@ -4349,18 +4351,19 @@ function openExpenseForm(expId){
   function show(id, on){ const el=document.getElementById(id); if(el) el.style.display = on ? '' : 'none'; }
   function applyBillType(){
     const bt = currentBillType() || 'SUPPLIER';
+    const isSupplierFamily = (bt==='SUPPLIER' || bt==='TELEPHONE' || bt==='VEHICLE');
     show('expVendorWrap', bt!=='SALARY' && bt!=='INTERBANK');
     show('expEmployeeWrap', bt==='SALARY');
     show('expSalaryMonthWrap', bt==='SALARY');
     show('expStatutoryTypeWrap', bt==='STATUTORY');
     show('expDescriptionWrap', bt!=='INTERBANK');
-    show('expCurrencyRow', bt==='SUPPLIER');
+    show('expCurrencyRow', isSupplierFamily);
     show('expSimpleAmountRow', bt==='STATUTORY' || bt==='SALARY');
     show('expInterBankWrap', bt==='INTERBANK');
-    show('expGstSection', bt==='SUPPLIER');
-    show('expTDSSection', bt==='SUPPLIER' || bt==='SALARY');
-    document.getElementById('expTdsSectionLabel').style.display = (bt==='SUPPLIER'||bt==='SALARY') ? '' : 'none';
-    show('expDeductionsSection', bt==='SUPPLIER' || bt==='SALARY');
+    show('expGstSection', isSupplierFamily);
+    show('expTDSSection', isSupplierFamily || bt==='SALARY');
+    document.getElementById('expTdsSectionLabel').style.display = (isSupplierFamily||bt==='SALARY') ? '' : 'none';
+    show('expDeductionsSection', isSupplierFamily || bt==='SALARY');
     show('expAdvanceSection', bt!=='INTERBANK');
     document.getElementById('expPaymentLabel').style.display = bt==='INTERBANK' ? 'none' : '';
     show('expDueDateWrap', bt!=='INTERBANK');
