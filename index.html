@@ -3755,7 +3755,7 @@ const TDS_SECTIONS = [
 ];
 const TDS_SECTION_BY_ID = Object.fromEntries(TDS_SECTIONS.map(s=>[s.id,s]));
 function tdsSectionLabel(s){ return `${s.oldCode} → ${s.newCode} · ${s.description} · ${s.defaultRate}%`; }
-const EXPENSE_CATEGORIES = ['Materials','Services','Rent','Utilities','Transport','Professional Fees','Statutory','Salary','Other'];
+const EXPENSE_CATEGORIES = ['Materials','Services','Rent','Utilities','Transport','Telephone Expenses','Vehicle Allowance','Professional Fees','Statutory','Salary','Other'];
 function nextExpNo(){
   const fy = currentFYShort();
   const key = 'EXP-'+fy;
@@ -4105,7 +4105,7 @@ function renderExpenses(c, actions){
       <div id="expTableWrap"></div>
     </div>
   `;
-  const BILL_TYPE_LABELS = { SUPPLIER:'Supplier', TELEPHONE:'Telephone Expenses', VEHICLE:'Vehicle', STATUTORY:'Statutory', SALARY:'Salary', INTERBANK:'Inter-Bank' };
+  const BILL_TYPE_LABELS = { SUPPLIER:'Supplier', REIMBURSEMENT:'Reimbursement', STATUTORY:'Statutory', SALARY:'Salary', INTERBANK:'Inter-Bank' };
   function expPartyLabel(e){
     if(e.billType==='SALARY') return e.employeeName || '—';
     if(e.billType==='INTERBANK') return `${e.fromBankName||'?'} → ${e.toBankName||'?'}`;
@@ -4205,8 +4205,7 @@ function openExpenseForm(expId){
       <div class="grid cols-3">
         <div class="field"><label>Bill Type</label><select name="billType" id="expBillType" ${isEdit?'disabled':''}>
           <option value="SUPPLIER" ${e.billType==='SUPPLIER'?'selected':''}>Bills from Supplier / Subcontractor</option>
-          <option value="TELEPHONE" ${e.billType==='TELEPHONE'?'selected':''}>Telephone Expenses</option>
-          <option value="VEHICLE" ${e.billType==='VEHICLE'?'selected':''}>Vehicle</option>
+          <option value="REIMBURSEMENT" ${e.billType==='REIMBURSEMENT'?'selected':''}>Reimbursement</option>
           <option value="STATUTORY" ${e.billType==='STATUTORY'?'selected':''}>Statutory Payment</option>
           <option value="SALARY" ${e.billType==='SALARY'?'selected':''}>Salary or Wages</option>
           <option value="INTERBANK" ${e.billType==='INTERBANK'?'selected':''}>Inter-Bank Transfer</option>
@@ -4351,7 +4350,7 @@ function openExpenseForm(expId){
   function show(id, on){ const el=document.getElementById(id); if(el) el.style.display = on ? '' : 'none'; }
   function applyBillType(){
     const bt = currentBillType() || 'SUPPLIER';
-    const isSupplierFamily = (bt==='SUPPLIER' || bt==='TELEPHONE' || bt==='VEHICLE');
+    const isSupplierFamily = (bt==='SUPPLIER' || bt==='REIMBURSEMENT');
     show('expVendorWrap', bt!=='SALARY' && bt!=='INTERBANK');
     show('expEmployeeWrap', bt==='SALARY');
     show('expSalaryMonthWrap', bt==='SALARY');
