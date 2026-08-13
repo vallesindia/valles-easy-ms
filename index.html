@@ -2906,8 +2906,9 @@ function txnStatusPill(status){
 }
 
 function renderTransactions(c, actions){
-  actions.innerHTML = `<button class="btn secondary" id="consolidatePfiBtn">Consolidate Proformas → GST/Non-GST</button> <button class="btn" id="newTxnBtn">+ New Transaction</button>`;
+  actions.innerHTML = `<button class="btn secondary" id="exportInvoiceBtn">Generate Monthly Invoice (Export)</button> <button class="btn secondary" id="consolidatePfiBtn">Consolidate Proformas → GST/Non-GST</button> <button class="btn" id="newTxnBtn">+ New Transaction</button>`;
   actions.querySelector('#newTxnBtn').onclick = ()=> openTxnForm();
+  actions.querySelector('#exportInvoiceBtn').onclick = ()=> openExportInvoiceModal();
   actions.querySelector('#consolidatePfiBtn').onclick = ()=> openConsolidateProformaModal();
 
   const outstandingInvoices = TRANSACTIONS.filter(t=>t.txnCategory==='INVOICE' && t.status!=='Paid' && t.status!=='Draft');
@@ -3319,21 +3320,29 @@ function convertToInvoice(piId){
 }
 let consolidateVesselRows = [];
 function blankVesselRow(){ return { name:'', count:1, exportDays:0, rate:0 }; }
-/* Consolidates several Proforma Invoices for a month into exactly two Invoices — one GST
-   (Domestic/Indian-waters portion), one Non-GST (Export/international-waters portion) —
-   using the exact apportionment worked out from the company's own working sheet:
-   1. Per vessel: Domestic Days = days in month − Export Days (entered per vessel per month).
-   2. Technical Service Fee (a flat per-day rate) splits cleanly: Export days → Non-GST,
-      Domestic days → GST @18%.
-   3. "Other Services" is billed as one lump sum per PI, not a clean daily rate, so it's
-      backed into: pool = (sum of selected PIs) − (Export Tech Fee) − (Domestic Tech Fee incl.
-      GST); that pool is treated as GST-inclusive (÷1.18 for its taxable value), spread evenly
-      across every vessel-day in the fleet that month to get one notional per-vessel-per-day
-      rate, then applied to each vessel's OWN Domestic Days for its GST-invoice share. Whatever
-      isn't captured that way becomes the Export/Non-GST Other Services amount, as a residual —
-      not separately rated, exactly as in the working sheet.
-   Verified against the company's real working file before shipping: every intermediate and
-   final figure matched exactly. */
+/* ---- Situation 1: pure Export Invoice (every vessel outside India all month) ----
+   Validated against the company's "GST and non-GST invoice working template" (5/5/26):
+   1. Technical Service — one line per vessel: (days in month) × rate/day ($105). Since every
+      vessel is outside India the whole month, ALL days are export days — no domestic split.
+   2. Other Service — a single figure the company decides each month (NOT computed; varies
+      month to month, e.g. $18,500 in the reference sheet).
+   3. Additional Service — the true remainder: Total Proforma Amount − Technical Service Total
+      − Other Service. Absorbs whatever's left, so the invoice always reconciles exactly to
+      the month's total proforma amount.
+   Reconciled exactly against the reference sheet's own numbers before shipping. */
+let exportInvoiceVesselRows = [];
+function blankExportVesselRow(){ return { name:'', count:1, rate:105 }; }
+function calcExportInvoice(monthDays, vessels, piTotal, otherService){
+  let technicalTotal = 0;
+  const perVessel = vessels.map(v=>{
+    const count = Number(v.count)||0, rate = Number(v.rate)||0;
+    const amount = monthDays*count*rate;
+    technicalTotal += amount;
+    return { ...v, days:monthDays, amount };
+  });
+  const additionalService = piTotal - technicalTotal - otherService;
+  return { perVessel, technicalTotal, otherService, additionalService, grandTotal: technicalTotal+otherService+additionalService };
+}
 function calcConsolidation(monthDays, vessels, piTotal){
   let totalExportTech = 0, totalDomesticTechInvoice = 0, totalDomesticTech = 0;
   const perVessel = vessels.map(v=>{
@@ -3363,6 +3372,136 @@ function calcConsolidation(monthDays, vessels, piTotal){
     nonGstInvoiceTotal: totalExportTech + exportOtherResidual,
     gstInvoiceTaxable: totalDomesticTech + totalDomesticOther,
     gstInvoiceTotal: totalDomesticTechInvoice + totalDomesticOtherInvoice
+  };
+}
+function openExportInvoiceModal(){
+  const defaultMonth = new Date().toISOString().slice(0,7);
+  exportInvoiceVesselRows = (ORG.vessels||[]).slice(0,12).map(name=>({...blankExportVesselRow(), name})) || [blankExportVesselRow()];
+  if(!exportInvoiceVesselRows.length) exportInvoiceVesselRows = [blankExportVesselRow()];
+  openModal(`
+    <div class="modal-head"><h3>Generate Monthly Invoice — Situation 1 (Pure Export)</h3><button class="modal-close" id="mClose">✕</button></div>
+    <p class="hint">For a month where every vessel is outside India the whole time. Select the month's Proforma Invoices, confirm the fleet, and enter this month's "Other Service" figure — Additional Service is whatever's left over, so the invoice always reconciles to the full proforma total.</p>
+    <div class="grid cols-2">
+      <div class="field"><label>Month</label><input type="month" id="eiMonth" value="${defaultMonth}"></div>
+      <div class="field"><label>Days in Month</label><input type="number" min="1" max="31" id="eiMonthDays" value="31"></div>
+    </div>
+    <div class="section-label">Proforma Invoices to Include</div>
+    <div id="eiPiList"></div>
+    <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;">
+      <span>Fleet This Month</span><button type="button" class="btn secondary sm" id="eiAddVessel">+ Add Vessel</button>
+    </div>
+    <div id="eiVesselWrap"></div>
+    <div class="field" style="max-width:280px;"><label>Other Service This Month (₹)</label><input type="number" min="0" step="0.01" id="eiOtherService" value="0"></div>
+    <div id="eiPreview"></div>
+    <div class="btn-row"><button class="btn" id="eiConfirm">Create Export Invoice</button><button class="btn secondary" id="mCancel">Cancel</button></div>
+  `, true);
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+
+  function setMonthDaysFromMonth(){
+    const [y,m] = document.getElementById('eiMonth').value.split('-').map(Number);
+    if(y && m) document.getElementById('eiMonthDays').value = new Date(y, m, 0).getDate();
+  }
+  document.getElementById('eiMonth').addEventListener('change', ()=>{ setMonthDaysFromMonth(); drawPiList(); });
+  setMonthDaysFromMonth();
+
+  function eligiblePIs(){
+    const month = document.getElementById('eiMonth').value;
+    return TRANSACTIONS.filter(t=> t.txnCategory==='PROFORMA' && !t.linkedInvoice && !t.linkedInvoiceGST && !t.linkedInvoiceNonGST && (t.txnDate||'').slice(0,7)===month);
+  }
+  function drawPiList(){
+    const pis = eligiblePIs();
+    const wrap = document.getElementById('eiPiList');
+    if(!pis.length){ wrap.innerHTML = '<div class="empty" style="padding:12px;">No unconverted Proforma Invoices found for this month.</div>'; drawPreview(); return; }
+    wrap.innerHTML = pis.map(p=>`<label class="checkline" style="display:flex;justify-content:space-between;padding:4px 0;">
+      <span><input type="checkbox" class="eiPiChk" value="${p.id}" checked> ${esc(p.txnNo)} — ${esc(p.partyName)}</span>
+      <b>${money2(calcTxnTotals(p).grandTotal)}</b>
+    </label>`).join('');
+    wrap.querySelectorAll('.eiPiChk').forEach(chk=> chk.addEventListener('change', drawPreview));
+    drawPreview();
+  }
+  function selectedPiTotal(){
+    const ids = Array.from(document.querySelectorAll('.eiPiChk:checked')).map(c=>c.value);
+    return TRANSACTIONS.filter(t=> ids.includes(t.id)).reduce((s,t)=> s+calcTxnTotals(t).grandTotalINR, 0);
+  }
+  function drawVesselRows(){
+    document.getElementById('eiVesselWrap').innerHTML = `
+      <datalist id="eiVesselNamesList">${(ORG.vessels||[]).map(v=>`<option value="${esc(v)}">`).join('')}</datalist>
+      ${exportInvoiceVesselRows.map((v,i)=>`
+      <div class="grid cols-4" style="align-items:end;margin-bottom:6px;">
+        <div class="field" style="grid-column:span 2;margin-bottom:0;"><label>Vessel Name</label><input type="text" list="eiVesselNamesList" data-evf="${i}-name" value="${esc(v.name)}" placeholder="Type or pick a saved vessel"></div>
+        <div class="field" style="margin-bottom:0;"><label>Rate/Day (₹)</label><input type="number" min="0" step="0.01" data-evf="${i}-rate" value="${v.rate}"></div>
+        <div class="field" style="margin-bottom:0;display:flex;gap:6px;align-items:end;"><div style="flex:1;font-size:12px;color:var(--muted);">${document.getElementById('eiMonthDays')?document.getElementById('eiMonthDays').value:31} days this month</div><button type="button" class="btn danger sm" data-rmevessel="${i}">✕</button></div>
+      </div>`).join('')}`;
+    document.querySelectorAll('[data-evf]').forEach(inp=> inp.addEventListener('input', ()=>{
+      const [i,field] = inp.dataset.evf.split('-');
+      exportInvoiceVesselRows[Number(i)][field] = field==='name' ? inp.value : Number(inp.value)||0;
+      drawPreview();
+    }));
+    document.querySelectorAll('[data-rmevessel]').forEach(b=> b.onclick=()=>{ exportInvoiceVesselRows.splice(Number(b.dataset.rmevessel),1); if(!exportInvoiceVesselRows.length) exportInvoiceVesselRows.push(blankExportVesselRow()); drawVesselRows(); drawPreview(); });
+  }
+  document.getElementById('eiAddVessel').onclick = ()=>{ exportInvoiceVesselRows.push(blankExportVesselRow()); drawVesselRows(); drawPreview(); };
+  document.getElementById('eiMonthDays').addEventListener('input', ()=>{ drawVesselRows(); drawPreview(); });
+  document.getElementById('eiOtherService').addEventListener('input', drawPreview);
+  function drawPreview(){
+    const monthDays = Number(document.getElementById('eiMonthDays').value)||31;
+    const piTotal = selectedPiTotal();
+    const otherService = Number(document.getElementById('eiOtherService').value)||0;
+    const calc = calcExportInvoice(monthDays, exportInvoiceVesselRows, piTotal, otherService);
+    document.getElementById('eiPreview').innerHTML = `
+      <div class="divider"></div>
+      <div class="grid cols-3">
+        <div><label>Selected PI Total</label><div><b>${money2(piTotal)}</b></div></div>
+        <div><label>Technical Service Total</label><div>${money2(calc.technicalTotal)}</div></div>
+        <div><label>Other Service</label><div>${money2(calc.otherService)}</div></div>
+        <div><label style="color:${calc.additionalService<0?'var(--bad)':'var(--ink)'};">Additional Service (remainder)</label><div style="color:${calc.additionalService<0?'var(--bad)':'var(--ink)'};"><b>${money2(calc.additionalService)}</b></div></div>
+        <div><label>Invoice Grand Total</label><div><b>${money2(calc.grandTotal)}</b></div></div>
+      </div>
+      ${calc.additionalService<0 ? `<div class="hint" style="color:var(--bad);">⚠ Additional Service is negative — Technical + Other Service exceeds the selected PI total. Check the fleet, rates, or Other Service figure.</div>` : ''}
+    `;
+  }
+  drawPiList(); drawVesselRows(); drawPreview();
+
+  document.getElementById('eiConfirm').onclick = async ()=>{
+    const selectedIds = Array.from(document.querySelectorAll('.eiPiChk:checked')).map(c=>c.value);
+    if(!selectedIds.length){ toast('Select at least one Proforma Invoice.', true); return; }
+    const selectedPIs = TRANSACTIONS.filter(t=> selectedIds.includes(t.id));
+    const monthDays = Number(document.getElementById('eiMonthDays').value)||31;
+    const piTotal = selectedPIs.reduce((s,t)=> s+calcTxnTotals(t).grandTotalINR, 0);
+    const otherService = Number(document.getElementById('eiOtherService').value)||0;
+    const calc = calcExportInvoice(monthDays, exportInvoiceVesselRows, piTotal, otherService);
+    const newVesselNames = exportInvoiceVesselRows.map(v=>v.name.trim()).filter(n=> n && !(ORG.vessels||[]).includes(n));
+    if(newVesselNames.length){ ORG.vessels = (ORG.vessels||[]).concat(newVesselNames); await saveOrg(); }
+    const month = document.getElementById('eiMonth').value;
+    const piNumbers = selectedPIs.map(p=>p.txnNo);
+    const party = PARTIES.find(p=>p.id===selectedPIs[0].partyId);
+    const btn = document.getElementById('eiConfirm'); btn.disabled = true; btn.textContent = 'Creating…';
+    try{
+      const items = [];
+      calc.perVessel.forEach(v=>{
+        if(!v.name.trim()) return;
+        items.push({ description:`Technical Service Fee — ${v.name} (Export)`, hsn:'', qty:v.days, uom:'DAY', rate:v.rate, discountPct:0, gstPct:0 });
+      });
+      if(calc.otherService>0) items.push({ description:'Other Services', hsn:'', qty:1, uom:'NOS', rate:calc.otherService, discountPct:0, gstPct:0 });
+      if(calc.additionalService!==0) items.push({ description:'Additional Services', hsn:'', qty:1, uom:'NOS', rate:calc.additionalService, discountPct:0, gstPct:0 });
+      const rec = {
+        id:uid(), txnCategory:'INVOICE', txnDirection:'Outgoing', partyId: party?party.id:'', partyName: party?party.partyName:selectedPIs[0].partyName,
+        txnDate:new Date().toISOString().slice(0,10), dueDate:'', referenceType:'Proforma', reference:piNumbers.join(', '),
+        subject:`Export Invoice — ${month} — Consolidated from ${piNumbers.length} Proforma Invoice(s)`,
+        status:'Draft', gstMode:'None', currency: selectedPIs[0].currency||'INR', exchRate: selectedPIs[0].exchRate||1, items,
+        linkedProformas: piNumbers, linkedProforma:'', terms:'', notes:`Situation 1 (Pure Export). Other Service: ${money2(calc.otherService)}. Additional Service: ${money2(calc.additionalService)}.`,
+        revisionNo:0, revisionHistory:[]
+      };
+      rec.txnNo = nextTxnNo('INVOICE');
+      tagRecord(rec, true);
+      TRANSACTIONS.push(rec);
+      selectedPIs.forEach(p=>{ p.linkedInvoice = rec.txnNo; p.status = 'Converted'; tagRecord(p, false); });
+      const saved = await saveTransactions();
+      if(saved===false) throw new Error('Local save failed — browser storage may be full.');
+      closeModal(); toast(`${rec.txnNo} created — ${money2(calc.grandTotal)}.`); render();
+    }catch(err){
+      btn.disabled = false; btn.textContent = 'Create Export Invoice';
+      toast('Could not create the invoice: '+(err.message||'unknown error'), true);
+    }
   };
 }
 function openConsolidateProformaModal(){
