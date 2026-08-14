@@ -3637,16 +3637,31 @@ function openConsolidateProformaModal(){
     const piNumbers = selectedPIs.map(p=>p.txnNo);
     const party = PARTIES.find(p=>p.id===selectedPIs[0].partyId);
 
-    const gstItems = [
-      { id:uid(), description:'Technical Service Fee — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticTechTaxable, gstPct:18 },
-      { id:uid(), description:'Other Services — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticOtherTaxable, gstPct:18 },
-      { id:uid(), description:'Additional Services — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticAdditionalTaxable, gstPct:18 }
-    ];
-    const nonGstItems = [
-      { id:uid(), description:'Technical Service Fee — Export (International Waters)', hsn:'', qty:1, rate:calc.totalExportTech, gstPct:0 },
-      { id:uid(), description:'Other Services — Export (International Waters)', hsn:'', qty:1, rate:calc.otherService, gstPct:0 },
-      { id:uid(), description:'Additional Services — Export (International Waters)', hsn:'', qty:1, rate:calc.exportAdditionalService, gstPct:0 }
-    ];
+    // Technical Service is inherently day-and-vessel-driven, so it's broken out per vessel on
+    // both invoices — that's what a real tax invoice needs for line-item-level GST
+    // reconciliation, not one pooled figure across the whole fleet. Other and Additional
+    // Service get the same per-vessel treatment on the GST side (where the day-based
+    // allocation is real), but stay as single pooled lines on the Export side, since there
+    // they're genuinely company-level figures (a manually-set monthly amount, and whatever's
+    // left over) rather than something tied to any one vessel's days.
+    const gstItems = [];
+    calc.perVessel.forEach(v=>{
+      if(v.domesticTechTaxable>0) gstItems.push({ id:uid(), description:`Technical Service Fee — ${v.name||'Vessel'} (${v.domesticDays} day(s) in Indian Waters)`, hsn:'', qty:1, rate:v.domesticTechTaxable, gstPct:18 });
+    });
+    calc.perVessel.forEach(v=>{
+      if(v.domesticOtherTaxable>0) gstItems.push({ id:uid(), description:`Other Services — ${v.name||'Vessel'} (Indian Waters)`, hsn:'', qty:1, rate:v.domesticOtherTaxable, gstPct:18 });
+    });
+    calc.perVessel.forEach(v=>{
+      if(v.domesticAdditionalTaxable>0) gstItems.push({ id:uid(), description:`Additional Services — ${v.name||'Vessel'} (Indian Waters)`, hsn:'', qty:1, rate:v.domesticAdditionalTaxable, gstPct:18 });
+    });
+    if(!gstItems.length) gstItems.push({ id:uid(), description:'No vessels had days in Indian Waters this month', hsn:'', qty:1, rate:0, gstPct:18 });
+
+    const nonGstItems = [];
+    calc.perVessel.forEach(v=>{
+      if(v.exportTech>0) nonGstItems.push({ id:uid(), description:`Technical Service Fee — ${v.name||'Vessel'} (${v.exportDays} day(s), International Waters)`, hsn:'', qty:1, rate:v.exportTech, gstPct:0 });
+    });
+    nonGstItems.push({ id:uid(), description:'Other Services — Export (International Waters)', hsn:'', qty:1, rate:calc.otherService, gstPct:0 });
+    nonGstItems.push({ id:uid(), description:'Additional Services — Export (International Waters)', hsn:'', qty:1, rate:calc.exportAdditionalService, gstPct:0 });
     const commonNotes = `Consolidated from Proforma Invoice(s): ${piNumbers.join(', ')} — ${month}.`;
 
     async function createInvoice(items, gstMode, label){
