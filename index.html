@@ -3704,6 +3704,22 @@ function deleteTxn(id){
   `);
   document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
   document.getElementById('confirmDelTxn').onclick = async ()=>{
+    // If this is an Invoice that a Proforma was converted into, clear that Proforma's
+    // conversion link too — otherwise it stays permanently marked "Converted" and excluded
+    // from every conversion tool's eligible list, with no way to regenerate it.
+    if(t.txnCategory==='INVOICE'){
+      TRANSACTIONS.forEach(pi=>{
+        if(pi.txnCategory!=='PROFORMA') return;
+        let touched = false;
+        if(pi.linkedInvoice===t.txnNo){ pi.linkedInvoice=''; touched=true; }
+        if(pi.linkedInvoiceGST===t.txnNo){ pi.linkedInvoiceGST=''; touched=true; }
+        if(pi.linkedInvoiceNonGST===t.txnNo){ pi.linkedInvoiceNonGST=''; touched=true; }
+        if(touched){
+          if(!pi.linkedInvoice && !pi.linkedInvoiceGST && !pi.linkedInvoiceNonGST) pi.status='Sent';
+          tagRecord(pi, false);
+        }
+      });
+    }
     TRANSACTIONS = TRANSACTIONS.filter(x=>x.id!==id); recordTombstone('transactions', id);
     await saveTransactions(); closeModal(); toast('Transaction deleted.'); render();
   };
