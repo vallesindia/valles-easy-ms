@@ -3319,7 +3319,7 @@ function convertToInvoice(piId){
   };
 }
 let consolidateVesselRows = [];
-function blankVesselRow(){ return { name:'', count:1, exportDays:0, rate:0 }; }
+function blankVesselRow(){ return { name:'', count:1, domesticDays:0, rate:0 }; }
 /* ---- Situation 1: pure Export Invoice (every vessel outside India all month) ----
    Validated against the company's "GST and non-GST invoice working template" (5/5/26):
    1. Technical Service — one line per vessel: (days in month) × rate/day ($105). Since every
@@ -3343,35 +3343,44 @@ function calcExportInvoice(monthDays, vessels, piTotal, otherService){
   const additionalService = piTotal - technicalTotal - otherService;
   return { perVessel, technicalTotal, otherService, additionalService, grandTotal: technicalTotal+otherService+additionalService };
 }
-function calcConsolidation(monthDays, vessels, piTotal){
-  let totalExportTech = 0, totalDomesticTechInvoice = 0, totalDomesticTech = 0;
+function calcMixedInvoice(monthDays, vessels, piTotal, otherService){
+  let totalExportTech = 0, totalDomesticTechTaxable = 0, totalDomesticTechInvoice = 0;
   const perVessel = vessels.map(v=>{
-    const count = Number(v.count)||0, exportDays = Number(v.exportDays)||0, rate = Number(v.rate)||0;
-    const domesticDays = monthDays - exportDays;
-    const exportTech = domesticDays>=0 ? exportDays*count*rate : 0;
-    const domesticTech = domesticDays>0 ? domesticDays*count*rate : 0;
-    const domesticTechGst = domesticTech*0.18;
-    totalExportTech += exportTech; totalDomesticTech += domesticTech; totalDomesticTechInvoice += domesticTech+domesticTechGst;
-    return { ...v, domesticDays, exportTech, domesticTech, domesticTechInvoice: domesticTech+domesticTechGst };
+    const count = Number(v.count)||0, domesticDays = Number(v.domesticDays)||0, rate = Number(v.rate)||0;
+    const exportDays = Math.max(0, monthDays - domesticDays);
+    const exportTech = exportDays*count*rate;
+    const domesticTechTaxable = domesticDays>0 ? domesticDays*count*rate : 0;
+    const domesticTechGst = domesticTechTaxable*0.18;
+    totalExportTech += exportTech;
+    totalDomesticTechTaxable += domesticTechTaxable;
+    totalDomesticTechInvoice += domesticTechTaxable+domesticTechGst;
+    return { ...v, exportDays, domesticDays, exportTech, domesticTechTaxable, domesticTechGst, domesticTechInvoice: domesticTechTaxable+domesticTechGst };
   });
-  const otherServicesPool = piTotal - totalExportTech - totalDomesticTechInvoice;
-  const otherServicesTaxable = otherServicesPool / 1.18;
-  const totalVesselCount = vessels.reduce((s,v)=> s+(Number(v.count)||0), 0);
-  const perDayPerVesselRate = (totalVesselCount>0 && monthDays>0) ? otherServicesTaxable/totalVesselCount/monthDays : 0;
-  let totalDomesticOtherInvoice = 0, totalDomesticOther = 0;
+  const totalOtherServicesCost = piTotal - totalExportTech - totalDomesticTechInvoice;
+  const additionalServiceCostPool = totalOtherServicesCost - otherService;
+  const otherServiceTaxableBase = otherService/1.18;
+  const additionalServiceTaxableBase = additionalServiceCostPool/1.18;
+  const perDayOtherRate = monthDays>0 ? otherServiceTaxableBase/12/monthDays : 0;
+  const perDayAdditionalRate = monthDays>0 ? additionalServiceTaxableBase/12/monthDays : 0;
+  let totalDomesticOtherTaxable=0, totalDomesticOtherInvoice=0, totalDomesticAdditionalTaxable=0, totalDomesticAdditionalInvoice=0;
   perVessel.forEach(v=>{
-    const domesticOther = v.domesticDays>0 ? perDayPerVesselRate*v.domesticDays : 0;
-    v.domesticOther = domesticOther; v.domesticOtherInvoice = domesticOther*1.18;
-    totalDomesticOther += domesticOther; totalDomesticOtherInvoice += v.domesticOtherInvoice;
+    const domesticOtherTaxable = v.domesticDays>0 ? perDayOtherRate*v.domesticDays : 0;
+    const domesticAdditionalTaxable = v.domesticDays>0 ? perDayAdditionalRate*v.domesticDays : 0;
+    v.domesticOtherTaxable = domesticOtherTaxable; v.domesticOtherGst = domesticOtherTaxable*0.18; v.domesticOtherInvoice = domesticOtherTaxable*1.18;
+    v.domesticAdditionalTaxable = domesticAdditionalTaxable; v.domesticAdditionalGst = domesticAdditionalTaxable*0.18; v.domesticAdditionalInvoice = domesticAdditionalTaxable*1.18;
+    totalDomesticOtherTaxable += domesticOtherTaxable; totalDomesticOtherInvoice += v.domesticOtherInvoice;
+    totalDomesticAdditionalTaxable += domesticAdditionalTaxable; totalDomesticAdditionalInvoice += v.domesticAdditionalInvoice;
   });
-  const exportOtherResidual = piTotal - totalExportTech - totalDomesticTechInvoice - totalDomesticOtherInvoice;
+  const exportAdditionalService = piTotal - totalExportTech - totalDomesticTechInvoice - totalDomesticOtherInvoice - totalDomesticAdditionalInvoice - otherService;
   return {
-    perVessel, totalExportTech, totalDomesticTech, totalDomesticTechInvoice,
-    otherServicesPool, otherServicesTaxable, perDayPerVesselRate,
-    totalDomesticOther, totalDomesticOtherInvoice, exportOtherResidual,
-    nonGstInvoiceTotal: totalExportTech + exportOtherResidual,
-    gstInvoiceTaxable: totalDomesticTech + totalDomesticOther,
-    gstInvoiceTotal: totalDomesticTechInvoice + totalDomesticOtherInvoice
+    perVessel, totalExportTech, totalDomesticTechTaxable, totalDomesticTechInvoice,
+    totalOtherServicesCost, otherService, additionalServiceCostPool,
+    perDayOtherRate, perDayAdditionalRate,
+    totalDomesticOtherTaxable, totalDomesticOtherInvoice, totalDomesticAdditionalTaxable, totalDomesticAdditionalInvoice,
+    exportAdditionalService,
+    nonGstInvoiceTotal: totalExportTech + otherService + exportAdditionalService,
+    gstInvoiceTaxable: totalDomesticTechTaxable + totalDomesticOtherTaxable + totalDomesticAdditionalTaxable,
+    gstInvoiceTotal: totalDomesticTechInvoice + totalDomesticOtherInvoice + totalDomesticAdditionalInvoice
   };
 }
 function openExportInvoiceModal(){
@@ -3509,7 +3518,7 @@ function openConsolidateProformaModal(){
   consolidateVesselRows = [blankVesselRow()];
   openModal(`
     <div class="modal-head"><h3>Consolidate Proformas → GST / Non-GST Invoices</h3><button class="modal-close" id="mClose">✕</button></div>
-    <p class="hint">Select every Proforma Invoice this batch covers, enter each vessel's days for the month, and this produces exactly two Invoices — one GST (Indian waters), one Non-GST (export) — that between them account for the full selected total.</p>
+    <p class="hint">For a month where one or more vessels spend part of their time in Indian waters. Select the month's Proforma Invoices, enter each vessel's days in Indian waters, and this month's "Other Service" figure — everything else (Additional Service, on both invoices) is worked out automatically so the two invoices always reconcile exactly to the full selected total.</p>
     <div class="grid cols-2">
       <div class="field"><label>Month</label><input type="month" id="consMonth" value="${defaultMonth}"></div>
       <div class="field"><label>Days in Month</label><input type="number" min="1" max="31" id="consMonthDays" value="31"></div>
@@ -3520,6 +3529,8 @@ function openConsolidateProformaModal(){
       <span>Vessels This Month</span><button type="button" class="btn secondary sm" id="addVesselRow">+ Add Vessel</button>
     </div>
     <div id="consVesselWrap"></div>
+    <div class="field" style="max-width:280px;"><label>Other Service This Month (₹)</label><input type="number" min="0" step="0.01" id="consOtherService" value="0"></div>
+    <p class="hint" style="margin:-6px 0 8px;">Decided by the company each month, not computed — Additional Service on both invoices is whatever's left after this, so everything still reconciles exactly to the selected proforma total.</p>
     <div id="consPreview"></div>
     <div class="btn-row"><button class="btn" id="confirmConsolidate">Create Both Invoices</button><button class="btn secondary" id="mCancel">Cancel</button></div>
   `, true);
@@ -3564,7 +3575,7 @@ function openConsolidateProformaModal(){
             <button type="button" class="btn secondary sm" data-vstep="${i}:1" style="min-width:30px;">+</button>
           </div>
         </div>
-        <div class="field" style="margin-bottom:0;"><label>Export Days This Month</label><input type="number" min="0" step="1" data-vf="${i}-exportDays" value="${v.exportDays}"></div>
+        <div class="field" style="margin-bottom:0;"><label>Days in Indian Waters</label><input type="number" min="0" step="1" data-vf="${i}-domesticDays" value="${v.domesticDays}"></div>
         <div class="field" style="margin-bottom:0;display:flex;gap:6px;align-items:end;"><div style="flex:1;"><label>Tech Fee Rate/Day</label><input type="number" min="0" step="0.01" data-vf="${i}-rate" value="${v.rate}"></div><button type="button" class="btn danger sm" data-rmvessel="${i}">✕</button></div>
       </div>`).join('')}`;
     document.querySelectorAll('[data-vf]').forEach(inp=> inp.addEventListener('input', ()=>{
@@ -3580,19 +3591,26 @@ function openConsolidateProformaModal(){
     document.querySelectorAll('[data-rmvessel]').forEach(b=> b.onclick=()=>{ consolidateVesselRows.splice(Number(b.dataset.rmvessel),1); if(!consolidateVesselRows.length) consolidateVesselRows.push(blankVesselRow()); drawVesselRows(); drawPreview(); });
   }
   document.getElementById('addVesselRow').onclick = ()=>{ consolidateVesselRows.push(blankVesselRow()); drawVesselRows(); drawPreview(); };
+  document.getElementById('consOtherService').addEventListener('input', drawPreview);
   function drawPreview(){
     const monthDays = Number(document.getElementById('consMonthDays').value)||31;
     const piTotal = selectedPiTotal();
-    const calc = calcConsolidation(monthDays, consolidateVesselRows, piTotal);
+    const otherService = Number(document.getElementById('consOtherService').value)||0;
+    const calc = calcMixedInvoice(monthDays, consolidateVesselRows, piTotal, otherService);
     document.getElementById('consPreview').innerHTML = `
       <div class="divider"></div>
+      <div><label>Selected PI Total</label><div><b>${money2(piTotal)}</b></div></div>
+      <div class="section-label" style="margin-top:10px;">Non-GST Invoice (Export)</div>
       <div class="grid cols-3">
-        <div><label>Selected PI Total</label><div><b>${money2(piTotal)}</b></div></div>
-        <div><label>Export Tech Fee (Non-GST)</label><div>${money2(calc.totalExportTech)}</div></div>
-        <div><label>Domestic Tech Fee (GST incl.)</label><div>${money2(calc.totalDomesticTechInvoice)}</div></div>
-        <div><label>Other Services Pool (GST incl.)</label><div>${money2(calc.otherServicesPool)}</div></div>
-        <div><label>Domestic Other Services (GST incl.)</label><div>${money2(calc.totalDomesticOtherInvoice)}</div></div>
-        <div><label>Export Other Services (residual)</label><div>${money2(calc.exportOtherResidual)}</div></div>
+        <div><label>Technical Service</label><div>${money2(calc.totalExportTech)}</div></div>
+        <div><label>Other Service</label><div>${money2(calc.otherService)}</div></div>
+        <div><label style="color:${calc.exportAdditionalService<0?'var(--bad)':'var(--ink)'};">Additional Service (remainder)</label><div style="color:${calc.exportAdditionalService<0?'var(--bad)':'var(--ink)'};"><b>${money2(calc.exportAdditionalService)}</b></div></div>
+      </div>
+      <div class="section-label" style="margin-top:10px;">GST Invoice (Domestic — Indian Waters)</div>
+      <div class="grid cols-3">
+        <div><label>Technical Service (incl. GST)</label><div>${money2(calc.totalDomesticTechInvoice)}</div></div>
+        <div><label>Other Service (incl. GST)</label><div>${money2(calc.totalDomesticOtherInvoice)}</div></div>
+        <div><label>Additional Service (incl. GST)</label><div>${money2(calc.totalDomesticAdditionalInvoice)}</div></div>
       </div>
       <div class="divider"></div>
       <div class="grid cols-2">
@@ -3600,6 +3618,7 @@ function openConsolidateProformaModal(){
         <div><label style="color:var(--good);">GST INVOICE TOTAL</label><div><b>${money2(calc.gstInvoiceTotal)}</b></div></div>
       </div>
       <div class="hint">Sum of both: ${money2(calc.nonGstInvoiceTotal+calc.gstInvoiceTotal)} — should match the selected PI total above.</div>
+      ${calc.exportAdditionalService<0 ? `<div class="hint" style="color:var(--bad);">⚠ Export Additional Service is negative — Technical + Other Service across both invoices exceeds the selected PI total. Check the fleet, rates, days, or Other Service figure.</div>` : ''}
     `;
   }
   drawPiList(); drawVesselRows(); drawPreview();
@@ -3610,7 +3629,8 @@ function openConsolidateProformaModal(){
     const selectedPIs = TRANSACTIONS.filter(t=> selectedIds.includes(t.id));
     const monthDays = Number(document.getElementById('consMonthDays').value)||31;
     const piTotal = selectedPIs.reduce((s,t)=> s+calcTxnTotals(t).grandTotalINR, 0);
-    const calc = calcConsolidation(monthDays, consolidateVesselRows, piTotal);
+    const otherService = Number(document.getElementById('consOtherService').value)||0;
+    const calc = calcMixedInvoice(monthDays, consolidateVesselRows, piTotal, otherService);
     const newVesselNames = consolidateVesselRows.map(v=>v.name.trim()).filter(n=> n && !(ORG.vessels||[]).includes(n));
     if(newVesselNames.length){ ORG.vessels = (ORG.vessels||[]).concat(newVesselNames); await saveOrg(); }
     const month = document.getElementById('consMonth').value;
@@ -3618,12 +3638,14 @@ function openConsolidateProformaModal(){
     const party = PARTIES.find(p=>p.id===selectedPIs[0].partyId);
 
     const gstItems = [
-      { id:uid(), description:'Technical Service Fee — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticTech, gstPct:18 },
-      { id:uid(), description:'Other Services — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticOther, gstPct:18 }
+      { id:uid(), description:'Technical Service Fee — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticTechTaxable, gstPct:18 },
+      { id:uid(), description:'Other Services — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticOtherTaxable, gstPct:18 },
+      { id:uid(), description:'Additional Services — Domestic (Indian Waters)', hsn:'', qty:1, rate:calc.totalDomesticAdditionalTaxable, gstPct:18 }
     ];
     const nonGstItems = [
       { id:uid(), description:'Technical Service Fee — Export (International Waters)', hsn:'', qty:1, rate:calc.totalExportTech, gstPct:0 },
-      { id:uid(), description:'Other Services — Export (International Waters)', hsn:'', qty:1, rate:calc.exportOtherResidual, gstPct:0 }
+      { id:uid(), description:'Other Services — Export (International Waters)', hsn:'', qty:1, rate:calc.otherService, gstPct:0 },
+      { id:uid(), description:'Additional Services — Export (International Waters)', hsn:'', qty:1, rate:calc.exportAdditionalService, gstPct:0 }
     ];
     const commonNotes = `Consolidated from Proforma Invoice(s): ${piNumbers.join(', ')} — ${month}.`;
 
