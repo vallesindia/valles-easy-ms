@@ -196,13 +196,16 @@
   .app-footer div:first-child{font-weight:600;color:var(--ink-soft);}
 
   @media print{
-    @page{ size:A4; margin:10mm; }
+    @page{ size:A4; margin:8mm; }
     body *{visibility:hidden;}
     #printArea, #printArea *{visibility:visible;}
     #printArea{position:absolute;left:0;top:0;width:100%;padding:0;margin:0;}
     #printArea img{display:block !important;}
     .payslip, .payslip *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important;}
     .items-table{font-size:9.5px;}
+    .pstable td{padding:4px 7px;line-height:1.25;}
+    .payslip-top{margin-bottom:6px;}
+    .payslip-title{margin:6px 0;}
     .no-print{display:none !important;}
   }
 </style>
