@@ -3881,17 +3881,26 @@ function calcExpenseTotals(e){
     if(e.gstMode==='Inter') igst = gstAmt;
     else if(e.gstMode==='Intra'){ cgst = gstAmt/2; sgst = gstAmt/2; }
   }
+  // A manual override — matching the vendor invoice's exact printed CGST/SGST/IGST — takes
+  // precedence over the %-derived figure for that specific tax, so real-invoice rounding
+  // never needs to be reverse-engineered from a percentage.
+  if(e.cgstOverride!=null && e.cgstOverride!=='') cgst = Number(e.cgstOverride)||0;
+  if(e.sgstOverride!=null && e.sgstOverride!=='') sgst = Number(e.sgstOverride)||0;
+  if(e.igstOverride!=null && e.igstOverride!=='') igst = Number(e.igstOverride)||0;
   // GST amount is always rounded to the nearest rupee — under 50 paise rounds down, 50 paise
   // and above rounds up (standard GST invoice rounding). Each component rounds separately,
-  // matching how a real tax invoice itemises CGST/SGST/IGST.
-  cgst = Math.round(cgst); sgst = Math.round(sgst); igst = Math.round(igst);
+  // matching how a real tax invoice itemises CGST/SGST/IGST. Manual overrides are trusted
+  // as-is (the point of entering one is to match an exact printed figure), not re-rounded.
+  const hasOverride = (e.cgstOverride!=null && e.cgstOverride!=='') || (e.sgstOverride!=null && e.sgstOverride!=='') || (e.igstOverride!=null && e.igstOverride!=='');
+  if(!hasOverride){ cgst = Math.round(cgst); sgst = Math.round(sgst); igst = Math.round(igst); }
   const gstTotal = cgst+sgst+igst;
   const tdsAmount = e.tdsApplicable ? amtINR * (Number(e.tdsRate)||0) / 100 : 0;
   const deductionsTotal = e.deductionsApplicable ? (Number(e.pfAmt)||0)+(Number(e.ptAmt)||0)+(Number(e.esicAmt)||0)+(Number(e.otherDeduction)||0) : 0;
+  const creditNoteAmount = Number(e.creditNoteAmount)||0;
   const grossTotal = e.rcmApplicable ? amtINR : (amtINR + gstTotal);
-  const netPayable = grossTotal - tdsAmount - deductionsTotal;
+  const netPayable = grossTotal - tdsAmount - deductionsTotal - creditNoteAmount;
   const balance = netPayable - (Number(e.paidAmount)||0); // negative = overpaid, kept visible rather than clamped to 0
-  return { amt, amtINR, cgst, sgst, igst, gstTotal, tdsAmount, deductionsTotal,
+  return { amt, amtINR, cgst, sgst, igst, gstTotal, tdsAmount, deductionsTotal, creditNoteAmount,
     grossTotal, netPayable, balance, payStatus:payStatusFor(netPayable, Number(e.paidAmount)||0) };
 }
 function expIsLocked(e){ return calcExpenseTotals(e).payStatus==='Paid' && !ORG.allowFinalisedExpenseEdit; }
@@ -4316,7 +4325,20 @@ function openExpenseForm(expId){
         <div class="field"><label>GST Mode</label><select name="gstMode" id="expGstMode" ${e.rcmApplicable?'disabled':''}><option value="None" ${e.gstMode==='None'?'selected':''}>None</option><option value="Intra" ${e.gstMode==='Intra'?'selected':''}>Intra-state (CGST + SGST)</option><option value="Inter" ${e.gstMode==='Inter'?'selected':''}>Inter-state (IGST)</option></select></div>
         <div class="field"><label>GST %</label><input type="number" min="0" step="0.01" name="gstPct" id="expGstPct" value="${e.gstPct}" ${e.rcmApplicable?'disabled':''}></div>
       </div>
-      <div class="field" style="background:#FFF7ED;border:1px solid #FDBA74;border-radius:8px;padding:10px 12px;">
+      <p class="hint" style="margin:-4px 0 8px;">GST is calculated from the % above by default. To match a vendor invoice's exact printed figures instead, enter the amounts directly below — filling any of these overrides the % calculation for that tax.</p>
+      <div class="grid cols-4">
+        <div class="field" style="margin-bottom:0;"><label>Taxable Amount</label><input type="number" step="0.01" id="expTaxableDisplay" value="${e.billAmount}" disabled style="background:var(--bg);"></div>
+        <div class="field" style="margin-bottom:0;"><label>Bill Amount in INR <span style="font-weight:400;color:var(--muted);">(auto)</span></label><input type="number" step="0.01" id="expAmtInrDisplay" disabled style="background:var(--bg);"></div>
+        <div class="field" style="margin-bottom:0;"><label>CGST Amount <span style="font-weight:400;color:var(--muted);">(₹, optional override)</span></label><input type="number" min="0" step="0.01" name="cgstOverride" id="expCgstOverride" value="${e.cgstOverride!=null?e.cgstOverride:''}"></div>
+        <div class="field" style="margin-bottom:0;"><label>SGST Amount <span style="font-weight:400;color:var(--muted);">(₹, optional override)</span></label><input type="number" min="0" step="0.01" name="sgstOverride" id="expSgstOverride" value="${e.sgstOverride!=null?e.sgstOverride:''}"></div>
+      </div>
+      <div class="grid cols-4" style="margin-top:8px;">
+        <div class="field" style="margin-bottom:0;"><label>IGST Amount <span style="font-weight:400;color:var(--muted);">(₹, optional override)</span></label><input type="number" min="0" step="0.01" name="igstOverride" id="expIgstOverride" value="${e.igstOverride!=null?e.igstOverride:''}"></div>
+        <div class="field" style="margin-bottom:0;"><label>Total Bill Amount <span style="font-weight:400;color:var(--muted);">(Taxable + GST, auto)</span></label><input type="number" step="0.01" id="expTotalBillDisplay" disabled style="background:var(--bg);"></div>
+        <div class="field" style="margin-bottom:0;"><label>Credit Note / Discount <span style="font-weight:400;color:var(--muted);">(₹)</span></label><input type="number" min="0" step="0.01" name="creditNoteAmount" id="expCreditNote" value="${e.creditNoteAmount||0}"></div>
+        <div class="field" style="margin-bottom:0;"><label>Credit Note / Discount Details</label><input type="text" name="creditNoteDetails" id="expCreditNoteDetails" value="${esc(e.creditNoteDetails)}" placeholder="Reference / description"></div>
+      </div>
+      <div class="field" style="background:#FFF7ED;border:1px solid #FDBA74;border-radius:8px;padding:10px 12px;margin-top:10px;">
         <label class="checkline"><input type="checkbox" name="rcmApplicable" id="expRcmChk" ${e.rcmApplicable?'checked':''}> 🔄 Reverse Charge (RCM) Applicable</label>
         <p class="hint" id="expRcmHelp" style="display:${e.rcmApplicable?'block':'none'};margin:6px 0 0;">Under RCM, <b>you</b> pay GST directly to the government (with matching Input Tax Credit) instead of the vendor collecting it — so the amount you pay the vendor excludes this GST.</p>
         <div class="grid cols-3" id="expRcmFields" style="display:${e.rcmApplicable?'grid':'none'};margin-top:8px;">
@@ -4487,6 +4509,11 @@ function openExpenseForm(expId){
       rcmApplicable: document.getElementById('expRcmChk').checked,
       rcmRate: Number(document.getElementById('expRcmRate').value)||0,
       rcmSupplyType: document.getElementById('expRcmSupply').value,
+      cgstOverride: document.getElementById('expCgstOverride').value!=='' ? Number(document.getElementById('expCgstOverride').value) : null,
+      sgstOverride: document.getElementById('expSgstOverride').value!=='' ? Number(document.getElementById('expSgstOverride').value) : null,
+      igstOverride: document.getElementById('expIgstOverride').value!=='' ? Number(document.getElementById('expIgstOverride').value) : null,
+      creditNoteAmount: Number(document.getElementById('expCreditNote').value)||0,
+      creditNoteDetails: document.getElementById('expCreditNoteDetails').value,
       tdsApplicable: document.getElementById('expTdsChk').checked,
       tdsRate: Number(document.getElementById('expTdsRate').value)||0,
       tdsFlatAmount: document.getElementById('expTdsFlatAmount').value!=='' ? Number(document.getElementById('expTdsFlatAmount').value) : null,
@@ -4503,6 +4530,9 @@ function openExpenseForm(expId){
   function drawTotalsPreview(){
     const bt = currentBillType();
     const tot = calcExpenseTotals(readForm());
+    if(document.getElementById('expTaxableDisplay')) document.getElementById('expTaxableDisplay').value = document.getElementById('expBillAmount').value;
+    if(document.getElementById('expAmtInrDisplay')) document.getElementById('expAmtInrDisplay').value = tot.amtINR.toFixed(2);
+    if(document.getElementById('expTotalBillDisplay')) document.getElementById('expTotalBillDisplay').value = (tot.amtINR + tot.gstTotal).toFixed(2);
     if(bt==='INTERBANK'){
       document.getElementById('expTotalsPreview').innerHTML = `
         <div class="divider"></div>
@@ -4541,7 +4571,7 @@ function openExpenseForm(expId){
     document.getElementById('expGstPct').disabled = on;
     drawTotalsPreview();
   });
-  ['expBillAmount','expExchRate','expGstMode','expGstPct','expRcmRate','expRcmSupply','expTdsRate','expPaidAmount','expPF','expPT','expESIC','expOtherDed','expStatutoryAmount','expTransferAmount'].forEach(id=> document.getElementById(id).addEventListener('input', drawTotalsPreview));
+  ['expBillAmount','expExchRate','expGstMode','expGstPct','expRcmRate','expRcmSupply','expTdsRate','expPaidAmount','expPF','expPT','expESIC','expOtherDed','expStatutoryAmount','expTransferAmount','expCgstOverride','expSgstOverride','expIgstOverride','expCreditNote'].forEach(id=> document.getElementById(id).addEventListener('input', drawTotalsPreview));
   document.getElementById('expTdsRate').addEventListener('input', ()=>{ document.getElementById('expTdsFlatAmount').value = ''; });
   drawTotalsPreview();
 
@@ -4650,6 +4680,10 @@ async function submitExpenseForm(ev, isEdit, e){
     description: fd.get('description')?fd.get('description').trim():'', category: fd.get('category')||'',
     billAmount: Number(fd.get('billAmount'))||0, currency: fd.get('currency')||'INR', exchRate: Number(fd.get('exchRate'))||1,
     gstMode: fd.get('gstMode')||'None', gstPct: Number(fd.get('gstPct'))||0,
+    cgstOverride: fd.get('cgstOverride')!=='' ? Number(fd.get('cgstOverride')) : null,
+    sgstOverride: fd.get('sgstOverride')!=='' ? Number(fd.get('sgstOverride')) : null,
+    igstOverride: fd.get('igstOverride')!=='' ? Number(fd.get('igstOverride')) : null,
+    creditNoteAmount: Number(fd.get('creditNoteAmount'))||0, creditNoteDetails: (fd.get('creditNoteDetails')||'').trim(),
     rcmApplicable: fd.get('rcmApplicable')==='on', rcmRate: Number(fd.get('rcmRate'))||0, rcmSupplyType: fd.get('rcmSupplyType')||'intra',
     gstr2bClaimMonth: fd.get('gstr2bClaimMonth')||'',
     tdsApplicable: fd.get('tdsApplicable')==='on', tdsSectionId: fd.get('tdsSectionId')||'', tdsRate: Number(fd.get('tdsRate'))||0,
