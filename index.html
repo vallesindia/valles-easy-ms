@@ -3912,6 +3912,33 @@ function expStatusPill(status){
 /* ============================= TAX COMPLIANCE ============================= */
 let taxComplianceMonth = new Date().getMonth()+1;
 let taxComplianceYear = new Date().getFullYear();
+/* PF Liability: Admin Charges (0.5%) reuse whatever wage base the employee's own 12% PF
+   contribution was actually computed on (capped or not, per Settings) — reverse-derived from
+   the stored pfEmployee figure rather than re-deriving the cap logic separately. EDLI (0.5%)
+   is always capped at ₹15,000 wages regardless of the employee's own PF cap setting — that's
+   a fixed EPFO rule, not a company policy choice. */
+function pfLiabilityData(year, month){
+  const period = year+'-'+String(month).padStart(2,'0');
+  const slips = PAYSLIPS.filter(p=> p.period===period && (p.pfEmployee>0 || p.pfEmployer>0));
+  const rows = slips.map(p=>{
+    const emp = EMPLOYEES.find(x=>x.id===p.empId);
+    const pfBase = p.pfEmployee>0 ? round2(p.pfEmployee/0.12) : 0;
+    const isCapped = pfBase>0 && pfBase < (p.basic||0) - 0.5;
+    const admin = Math.round(pfBase*0.005);
+    const edliBase = Math.min(p.basic||0, 15000);
+    const edli = Math.round(edliBase*0.005);
+    const total = round2((p.pfEmployee||0)+(p.pfEmployer||0)+admin+edli);
+    return { empId:p.empId, name:p.empName||(emp?emp.name:'—'), type:(emp?emp.department:'')||'—', pfWages:p.basic||0,
+      isCapped, pfEmployee:p.pfEmployee||0, pfEmployer:p.pfEmployer||0, admin, edli, edliCapped: edliBase<(p.basic||0)-0.5, total,
+      uan:emp?emp.uan:'', pfNumber:emp?emp.pfNumber:'' };
+  });
+  const totals = rows.reduce((s,r)=>({ pfWages:s.pfWages+r.pfWages, pfEmployee:s.pfEmployee+r.pfEmployee, pfEmployer:s.pfEmployer+r.pfEmployer, admin:s.admin+r.admin, edli:s.edli+r.edli, total:s.total+r.total }),
+    {pfWages:0, pfEmployee:0, pfEmployer:0, admin:0, edli:0, total:0});
+  const deadlineYear = month===12 ? year+1 : year;
+  const deadlineMonth = month===12 ? 1 : month+1;
+  const deadline = new Date(deadlineYear, deadlineMonth-1, 15); // PF deposit deadline: 15th of next month
+  return { period, rows, totals, deadline };
+}
 function taxComplianceData(year, month){
   const period = year+'-'+String(month).padStart(2,'0');
   const monthStart = period+'-01';
@@ -3980,9 +4007,12 @@ function taxComplianceData(year, month){
 function renderTaxCompliance(c, actions){
   actions.innerHTML = '';
   const d = taxComplianceData(taxComplianceYear, taxComplianceMonth);
+  const pf = pfLiabilityData(taxComplianceYear, taxComplianceMonth);
   const monthLabel = new Date(taxComplianceYear, taxComplianceMonth-1, 1).toLocaleString('en-IN',{month:'short'});
   const monthLong = new Date(taxComplianceYear, taxComplianceMonth-1, 1).toLocaleString('en-IN',{month:'long'});
   const deadlineLabel = d.deadline.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
+  const pfDeadlineLabel = pf.deadline.toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'});
+  const pfBillExists = EXPENSES.some(e=> e.billType==='STATUTORY' && e.statutoryType==='PF' && (e.billDate||'').slice(0,7)===pf.period);
   c.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
       <div></div>
@@ -4073,12 +4103,88 @@ function renderTaxCompliance(c, actions){
         <div style="font-size:12px;">${d.gstPayable>=0?'Payable':'Carried forward as credit'}</div>
       </div>
     </div>
+    <div class="card" style="margin-top:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;">
+        <div>
+          <h2 style="margin:0;">🏦 PF Liability — ${esc(monthLong)} ${taxComplianceYear}</h2>
+          <p style="color:var(--muted);font-size:12.5px;margin:2px 0 0;">${pf.rows.length} contributing staff · Total payable: <b>${money(pf.totals.total)}</b> · Due by ${esc(pfDeadlineLabel)}</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn sm" id="pfGenerateBillBtn">+ Generate PF Payable Bill</button>
+          <button class="btn secondary sm" id="pfExportEcrBtn">⬇ Export ECR (.txt)</button>
+        </div>
+      </div>
+      ${pf.rows.length ? `
+      <div style="overflow-x:auto;margin-top:10px;">
+      <table><thead><tr><th>Staff</th><th>Type</th><th class="num-cell">PF Wages</th><th class="num-cell">Employee 12%</th><th class="num-cell">Employer 12%</th><th class="num-cell">Admin 0.5%</th><th class="num-cell">EDLI 0.5%</th><th class="num-cell">Total</th></tr></thead><tbody>
+        ${pf.rows.map(r=>`<tr>
+          <td><b>${esc(r.name)}</b>${r.isCapped?` <span style="color:var(--accent);font-size:11px;">(PF capped)</span>`:''}</td>
+          <td style="color:var(--muted);">${esc(r.type)}</td>
+          <td class="num-cell">${money2(r.pfWages)}</td>
+          <td class="num-cell">${money2(r.pfEmployee)}</td>
+          <td class="num-cell">${money2(r.pfEmployer)}</td>
+          <td class="num-cell">${money2(r.admin)}</td>
+          <td class="num-cell">${money2(r.edli)}${r.edliCapped?` <span style="color:var(--muted);font-size:10.5px;">(on 15k cap)</span>`:''}</td>
+          <td class="num-cell"><b>${money2(r.total)}</b></td>
+        </tr>`).join('')}
+        <tr class="totrow" style="background:var(--bg);"><td colspan="2"><b>PERIOD TOTAL</b></td>
+          <td class="num-cell"><b>${money2(pf.totals.pfWages)}</b></td>
+          <td class="num-cell"><b>${money2(pf.totals.pfEmployee)}</b></td>
+          <td class="num-cell"><b>${money2(pf.totals.pfEmployer)}</b></td>
+          <td class="num-cell"><b>${money2(pf.totals.admin)}</b></td>
+          <td class="num-cell"><b>${money2(pf.totals.edli)}</b></td>
+          <td class="num-cell"><b>${money2(pf.totals.total)}</b></td>
+        </tr>
+      </tbody></table>
+      </div>
+      <p class="hint" style="margin-top:8px;">${pfBillExists ? '✓ A PF payable bill has already been recorded for this period.' : `No PF payment bill recorded for ${esc(monthLong)} ${taxComplianceYear}. Click "+ Generate PF Payable Bill" above to create one (it'll appear in the next Payment Request).`}</p>
+      ` : `<div class="empty" style="margin-top:10px;">No payslips with PF this period — generate this month's payslips first.</div>`}
+    </div>
   `;
   document.getElementById('tcMonth').onchange = (e)=>{ taxComplianceMonth = Number(e.target.value); renderTaxCompliance(c, actions); };
   document.getElementById('tcYear').onchange = (e)=>{ taxComplianceYear = Number(e.target.value); renderTaxCompliance(c, actions); };
   document.getElementById('tcTdsPdf').onclick = ()=> printTaxComplianceReport('tds', d, monthLong);
   document.getElementById('tcGstPdf').onclick = ()=> printTaxComplianceReport('gst', d, monthLong);
   document.getElementById('tcGstCsv').onclick = ()=> exportTaxComplianceCsv(d, monthLong);
+  if(pf.rows.length){
+    document.getElementById('pfGenerateBillBtn').onclick = ()=> generatePfPayableBill(pf, monthLong);
+    document.getElementById('pfExportEcrBtn').onclick = ()=> exportPfEcr(pf, monthLong);
+  }
+}
+async function generatePfPayableBill(pf, monthLong){
+  if(EXPENSES.some(e=> e.billType==='STATUTORY' && e.statutoryType==='PF' && (e.billDate||'').slice(0,7)===pf.period)){
+    toast('A PF payable bill already exists for this period — check Bills & Expenses.', true); return;
+  }
+  const rec = {
+    id: uid(), billType:'STATUTORY', statutoryType:'PF', statutoryAmount: pf.totals.total,
+    billDate: pf.period+'-01', dueDate: pf.deadline.toISOString().slice(0,10),
+    description: `EPF contribution (Employee+Employer+Admin+EDLI) for ${monthLong}`,
+    category:'Statutory', paidAmount:0, paymentMode:'', notes:`Auto-generated from Tax Compliance — ${pf.rows.length} staff.`
+  };
+  tagRecord(rec, true);
+  rec.voucherNo = nextExpNo();
+  EXPENSES.push(rec);
+  const saved = await saveExpenses();
+  if(saved===false){ toast('Could not save the PF bill — local storage may be full.', true); return; }
+  toast(`PF Payable Bill ${rec.voucherNo} created for ${money(pf.totals.total)}.`);
+  render();
+}
+function exportPfEcr(pf, monthLong){
+  // Standard EPFO ECR text format: pipe-delimited, one row per employee —
+  // UAN#~#Name#~#GrossWages#~#EPFWages#~#EPSWages#~#EDLIWages#~#EPFContribution#~#EPSContribution#~#EPFEPSDiff#~#NCPDays#~#RefundAdvance
+  const lines = pf.rows.map(r=>{
+    const epsWages = Math.min(r.pfWages, 15000);
+    const epsContribution = round2(epsWages*0.0833); // 8.33% of the employer's 12% goes to EPS, capped at 15k wages
+    const epfEpsDiff = round2(r.pfEmployer - epsContribution);
+    return [r.uan||'', r.name, r.pfWages.toFixed(2), Math.min(r.pfWages,15000).toFixed(2), epsWages.toFixed(2), Math.min(r.pfWages,15000).toFixed(2),
+      r.pfEmployee.toFixed(2), epsContribution.toFixed(2), epfEpsDiff.toFixed(2), '0', '0.00'].join('#~#');
+  });
+  const content = lines.join('\r\n');
+  const blob = new Blob([content], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = `ECR_${monthLong}_${taxComplianceYear}.txt`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=> URL.revokeObjectURL(url), 5000);
 }
 function printTaxComplianceReport(kind, d, monthLong){
   const isTds = kind==='tds';
