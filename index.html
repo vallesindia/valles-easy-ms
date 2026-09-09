@@ -1399,8 +1399,19 @@ function renderPayslips(c, actions){
   actions.innerHTML = `<button class="btn" id="genBtn">+ Generate Payslip</button>`;
   actions.querySelector('#genBtn').onclick = openGeneratePayslip;
   const bonusSlips = PAYSLIPS.filter(p=>p.bonus>0);
+  const allPeriods = [...new Set(PAYSLIPS.map(p=>p.period).filter(Boolean))].sort();
+  const months = [...new Set(allPeriods.map(p=>p.slice(5,7)))].sort();
+  const years = [...new Set(allPeriods.map(p=>p.slice(0,4)))].sort().reverse();
   c.innerHTML = `
-    <div class="card"><h2>Issued Payslips</h2><div id="payslipTableWrap"></div></div>
+    <div class="card">
+      <h2>Issued Payslips</h2>
+      <div class="grid cols-3" style="margin-bottom:10px;">
+        <div class="field"><label>Search Staff Name</label><input type="text" id="pslipSearch" placeholder="Employee name..."></div>
+        <div class="field"><label>Month</label><select id="pslipMonthFilter"><option value="">All Months</option>${months.map(m=>{ const label = new Date(2000,Number(m)-1,1).toLocaleString('en-IN',{month:'long'}); return `<option value="${m}">${label}</option>`; }).join('')}</select></div>
+        <div class="field"><label>Year</label><select id="pslipYearFilter"><option value="">All Years</option>${years.map(y=>`<option value="${y}">${y}</option>`).join('')}</select></div>
+      </div>
+      <div id="payslipTableWrap"></div>
+    </div>
     ${bonusSlips.length ? `
     <div class="card">
       <h2>Bonus &amp; TDS Impact Record</h2>
@@ -1415,24 +1426,40 @@ function renderPayslips(c, actions){
       </tbody></table>
     </div>` : ''}
   `;
-  const wrap = document.getElementById('payslipTableWrap');
-  if(!PAYSLIPS.length){
-    wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No payslips generated yet.<div class="cta"><button class="btn" id="emptyGenBtn">+ Generate Payslip</button></div></div>';
-    document.getElementById('emptyGenBtn').onclick = openGeneratePayslip; return;
+  function drawPayslipList(){
+    const wrap = document.getElementById('payslipTableWrap');
+    if(!PAYSLIPS.length){
+      wrap.innerHTML = '<div class="empty"><div class="icon">🧾</div>No payslips generated yet.<div class="cta"><button class="btn" id="emptyGenBtn">+ Generate Payslip</button></div></div>';
+      document.getElementById('emptyGenBtn').onclick = openGeneratePayslip; return;
+    }
+    const q = (document.getElementById('pslipSearch').value||'').toLowerCase();
+    const month = document.getElementById('pslipMonthFilter').value;
+    const year = document.getElementById('pslipYearFilter').value;
+    const list = PAYSLIPS.filter(p=>{
+      const mq = !q || (p.empName||'').toLowerCase().includes(q);
+      const mm = !month || (p.period||'').slice(5,7)===month;
+      const my = !year || (p.period||'').slice(0,4)===year;
+      return mq && mm && my;
+    });
+    if(!list.length){ wrap.innerHTML = '<div class="empty">No payslips match this filter.</div>'; return; }
+    wrap.innerHTML = `<table><thead><tr><th>Employee</th><th>Period</th><th class="num-cell">Gross</th><th class="num-cell">Deductions</th><th class="num-cell">Net Pay</th><th></th></tr></thead><tbody>
+      ${list.slice().reverse().map(p=>`
+        <tr><td>${esc(p.empName)}${p.bonus>0?' <span class="pill accent" title="Ex-gratia bonus paid this month">+ bonus</span>':''}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.gross+(p.bonus||0))}</td>
+        <td class="num-cell">${money(p.totalDeductions)}</td><td class="num-cell"><b>${money(p.netPay)}</b></td>
+        <td class="no-print" style="white-space:nowrap;">
+          <button class="btn secondary sm" data-open="${p.id}">View / Print</button>
+          <button class="btn secondary sm" data-editslip="${p.id}">✎ Edit</button>
+          <button class="btn danger sm" data-delslip="${p.id}">🗑</button>
+        </td></tr>`).join('')}
+    </tbody></table>`;
+    wrap.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openPayslipView(b.dataset.open));
+    wrap.querySelectorAll('[data-editslip]').forEach(b=>b.onclick=()=>openEditPayslip(b.dataset.editslip));
+    wrap.querySelectorAll('[data-delslip]').forEach(b=>b.onclick=()=>deletePayslip(b.dataset.delslip));
   }
-  wrap.innerHTML = `<table><thead><tr><th>Employee</th><th>Period</th><th class="num-cell">Gross</th><th class="num-cell">Deductions</th><th class="num-cell">Net Pay</th><th></th></tr></thead><tbody>
-    ${PAYSLIPS.slice().reverse().map(p=>`
-      <tr><td>${esc(p.empName)}${p.bonus>0?' <span class="pill accent" title="Ex-gratia bonus paid this month">+ bonus</span>':''}</td><td>${esc(p.period)}</td><td class="num-cell">${money(p.gross+(p.bonus||0))}</td>
-      <td class="num-cell">${money(p.totalDeductions)}</td><td class="num-cell"><b>${money(p.netPay)}</b></td>
-      <td class="no-print" style="white-space:nowrap;">
-        <button class="btn secondary sm" data-open="${p.id}">View / Print</button>
-        <button class="btn secondary sm" data-editslip="${p.id}">✎ Edit</button>
-        <button class="btn danger sm" data-delslip="${p.id}">🗑</button>
-      </td></tr>`).join('')}
-  </tbody></table>`;
-  wrap.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openPayslipView(b.dataset.open));
-  wrap.querySelectorAll('[data-editslip]').forEach(b=>b.onclick=()=>openEditPayslip(b.dataset.editslip));
-  wrap.querySelectorAll('[data-delslip]').forEach(b=>b.onclick=()=>deletePayslip(b.dataset.delslip));
+  if(PAYSLIPS.length){
+    ['pslipSearch','pslipMonthFilter','pslipYearFilter'].forEach(id=> document.getElementById(id).addEventListener('input', drawPayslipList));
+  }
+  drawPayslipList();
 }
 
 /* ---- Edit a generated payslip (corrections) ---- */
