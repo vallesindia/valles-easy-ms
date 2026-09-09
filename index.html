@@ -1331,6 +1331,18 @@ function fyMonthsList(period){
   }
   return months;
 }
+/* One payslip per period for this employee — if a period was ever regenerated without
+   deleting the original, this keeps only the most recently generated one, so the cumulative
+   TDS calculation (which looks at "actual income and TDS already recorded this FY") never
+   double-counts a duplicate. */
+function dedupedPayslipsFor(empId, periods){
+  const byPeriod = {};
+  PAYSLIPS.filter(p=> p.empId===empId && periods.includes(p.period)).forEach(p=>{
+    const existing = byPeriod[p.period];
+    if(!existing || new Date(p.generatedAt||0) > new Date(existing.generatedAt||0)) byPeriod[p.period] = p;
+  });
+  return Object.values(byPeriod);
+}
 function computePayslip(emp, period, recurringAddition, lumpSum, lumpSumRateOverride){
   recurringAddition = Number(recurringAddition)||0;
   lumpSum = Number(lumpSum)||0;
@@ -1366,7 +1378,7 @@ function computePayslip(emp, period, recurringAddition, lumpSum, lumpSumRateOver
     const fyMonths = fyMonthsList(period);
     const idx = fyMonths.indexOf(period);
     const monthsRemainingInclusive = idx>=0 ? (12-idx) : 12;
-    const priorPayslips = idx>=0 ? PAYSLIPS.filter(p=> p.empId===emp.id && fyMonths.indexOf(p.period)>=0 && fyMonths.indexOf(p.period)<idx) : [];
+    const priorPayslips = idx>=0 ? dedupedPayslipsFor(emp.id, fyMonths.slice(0,idx)) : [];
     const priorTdsDeducted = priorPayslips.reduce((sum,p)=> sum + (Number(p.tds)||0), 0);
     const priorLumpSums = priorPayslips.reduce((sum,p)=> sum + (Number(p.lumpSum)||0), 0);
     // Full-year projection (not cumulative actuals) — regular annual gross + this recurring
@@ -1389,7 +1401,7 @@ function computePayslip(emp, period, recurringAddition, lumpSum, lumpSumRateOver
     // annual tax ÷ standard annual gross (matches a steady month with no bonus history).
     const fyMonths = fyMonthsList(period);
     const idx = fyMonths.indexOf(period);
-    const priorPayslips = idx>=0 ? PAYSLIPS.filter(p=> p.empId===emp.id && fyMonths.indexOf(p.period)>=0 && fyMonths.indexOf(p.period)<idx) : [];
+    const priorPayslips = idx>=0 ? dedupedPayslipsFor(emp.id, fyMonths.slice(0,idx)) : [];
     const lastLumpSumEvent = priorPayslips.slice().reverse().find(p=> p.appliedFlatRate!=null);
     if(lastLumpSumEvent){
       appliedFlatRate = lastLumpSumEvent.appliedFlatRate;
@@ -1416,7 +1428,18 @@ function renderPayslips(c, actions){
   const allPeriods = [...new Set(PAYSLIPS.map(p=>p.period).filter(Boolean))].sort();
   const months = [...new Set(allPeriods.map(p=>p.slice(5,7)))].sort();
   const years = [...new Set(allPeriods.map(p=>p.slice(0,4)))].sort().reverse();
+  // Detect duplicates (same employee+period) left over from before regenerating a payslip
+  // replaced the old one instead of creating a second copy — these double-count salary TDS
+  // in Tax Compliance and in later months' cumulative calculation.
+  const byEmpPeriod = {};
+  PAYSLIPS.forEach(p=>{ const k=p.empId+'|'+p.period; (byEmpPeriod[k]=byEmpPeriod[k]||[]).push(p); });
+  const duplicateGroups = Object.values(byEmpPeriod).filter(g=>g.length>1);
   c.innerHTML = `
+    ${duplicateGroups.length ? `<div class="card" style="background:#FEF2F2;border:1px solid #FCA5A5;">
+      <h2 style="color:var(--bad);">⚠ ${duplicateGroups.length} Duplicate Payslip${duplicateGroups.length>1?'s':''} Found</h2>
+      <p style="font-size:13px;">${duplicateGroups.reduce((s,g)=>s+g.length,0)} payslip records exist for employee+period combinations that should have just one — this double-counts salary TDS in Tax Compliance and can throw off the cumulative TDS calculation for later months. Keeping only the most recently generated one per employee+period is almost always correct.</p>
+      <div class="btn-row"><button class="btn danger sm" id="removeDupPayslipsBtn">Remove ${duplicateGroups.reduce((s,g)=>s+g.length-1,0)} Duplicate(s), Keep Most Recent</button></div>
+    </div>` : ''}
     <div class="card">
       <h2>Issued Payslips</h2>
       <div class="grid cols-3" style="margin-bottom:10px;">
@@ -1473,6 +1496,20 @@ function renderPayslips(c, actions){
   if(PAYSLIPS.length){
     ['pslipSearch','pslipMonthFilter','pslipYearFilter'].forEach(id=> document.getElementById(id).addEventListener('input', drawPayslipList));
   }
+  const removeDupBtn = document.getElementById('removeDupPayslipsBtn');
+  if(removeDupBtn) removeDupBtn.onclick = async ()=>{
+    if(!confirm(`This removes ${duplicateGroups.reduce((s,g)=>s+g.length-1,0)} older duplicate payslip(s), keeping only the most recently generated one per employee+period. This cannot be undone from here — proceed?`)) return;
+    const idsToRemove = [];
+    duplicateGroups.forEach(g=>{
+      const sorted = g.slice().sort((a,b)=> new Date(b.generatedAt||0) - new Date(a.generatedAt||0));
+      sorted.slice(1).forEach(p=> idsToRemove.push(p.id));
+    });
+    PAYSLIPS = PAYSLIPS.filter(p=> !idsToRemove.includes(p.id));
+    idsToRemove.forEach(id=> recordTombstone('payslips', id));
+    await savePayslips();
+    toast(`Removed ${idsToRemove.length} duplicate payslip(s).`);
+    render();
+  };
   drawPayslipList();
 }
 
@@ -1601,17 +1638,19 @@ function openGeneratePayslip(){
   preview();
   document.getElementById('genConfirm').onclick = async ()=>{
     const btn = document.getElementById('genConfirm');
-    btn.disabled = true; btn.textContent = 'Generating…';
     try{
       const emp = EMPLOYEES.find(x=>x.id===document.getElementById('genEmp').value);
       if(!emp) throw new Error('No employee selected.');
       const period = document.getElementById('genPeriod').value;
+      const existing = PAYSLIPS.find(p=> p.empId===emp.id && p.period===period);
+      if(existing && !confirm(`A payslip for ${emp.name} — ${period} already exists (Net Pay ${money(existing.netPay)}, generated ${new Date(existing.generatedAt).toLocaleDateString('en-IN')}).\n\nGenerating again will REPLACE it, not create a second copy — keeping a duplicate around would double-count this employee's salary in Tax Compliance and in next month's TDS calculation.\n\nContinue and replace it?`)) return;
+      btn.disabled = true; btn.textContent = 'Generating…';
       const recurring = Number(document.getElementById('genRecurring').value)||0;
       const lump = Number(document.getElementById('genLumpSum').value)||0;
       const rateOverride = lump>0 ? (Number(document.getElementById('genLumpSumRate').value)||0)/100 : null;
       const r = computePayslip(emp, period, recurring, lump, rateOverride);
       const record = {
-        id:uid(), empId:emp.id, empName:emp.name, empCode:emp.empCode, designation:emp.designation,
+        id: existing?existing.id:uid(), empId:emp.id, empName:emp.name, empCode:emp.empCode, designation:emp.designation,
         department:emp.department, grade:emp.grade, location:emp.location, division:emp.division,
         pfNumber:emp.pfNumber, uan:emp.uan,
         dob:emp.dob, doj:emp.doj, pan:emp.pan,
@@ -1625,11 +1664,11 @@ function openGeneratePayslip(){
         taxRegime:r.salarySnapshot.taxRegime, taxableAnnual:r.taxableAnnual,
         generatedAt: new Date().toISOString()
       };
-      tagRecord(record, true);
-      PAYSLIPS.push(record);
+      tagRecord(record, !existing);
+      if(existing){ Object.assign(existing, record); } else { PAYSLIPS.push(record); }
       const saved = await savePayslips();
       if(saved===false) throw new Error('Local save failed — browser storage may be full.');
-      closeModal(); toast('Payslip generated and saved.'); render(); openPayslipView(record.id);
+      closeModal(); toast(existing?'Payslip replaced.':'Payslip generated and saved.'); render(); openPayslipView(record.id);
     }catch(err){
       btn.disabled = false; btn.textContent = 'Generate';
       toast('Could not save the payslip: '+(err.message||'unknown error')+' — nothing was recorded, please try again.', true);
@@ -4080,7 +4119,16 @@ function taxComplianceData(year, month){
   // TDS to Deposit — Salary (Section 192, from Payslips) + everything else (from Bills &
   // Expenses with TDS applicable), grouped by section for the breakdown, and also collected
   // as individual line items for the detailed report table.
-  const salarySlips = PAYSLIPS.filter(p=>p.period===period);
+  // Deduplicate by employee — if a payslip was ever regenerated without deleting the
+  // original (e.g. before the duplicate-prevention check existed), keep only the most
+  // recently generated one per employee for this period, so salary TDS isn't double-counted.
+  const salarySlipsRaw = PAYSLIPS.filter(p=>p.period===period);
+  const salarySlipsByEmp = {};
+  salarySlipsRaw.forEach(p=>{
+    const existing = salarySlipsByEmp[p.empId];
+    if(!existing || new Date(p.generatedAt||0) > new Date(existing.generatedAt||0)) salarySlipsByEmp[p.empId] = p;
+  });
+  const salarySlips = Object.values(salarySlipsByEmp);
   const salaryTds = round2(salarySlips.reduce((s,p)=> s+(Number(p.tds)||0), 0));
   const bySection = {};
   const lineItems = [];
