@@ -835,7 +835,11 @@ function openEmployeeForm(empId){
         <div class="field"><label>UAN (EPFO)</label><input type="text" name="uan" value="${esc(e.uan)}"></div>
         <div class="field"><label>PF Number</label><input type="text" name="pfNumber" value="${esc(e.pfNumber)}"></div>
       </div>
-      <div class="grid cols-4"><div class="field"><label>ESIC No.</label><input type="text" name="esicNo" value="${esc(e.esicNo)}"></div></div>
+      <div class="grid cols-4">
+        <div class="field"><label>ESIC No.</label><input type="text" name="esicNo" value="${esc(e.esicNo)}"></div>
+        <div class="field"><label>TDS Report Code Override <span style="font-weight:400;color:var(--muted);">(optional)</span></label><input type="text" name="tdsReportCodeOverride" value="${esc(e.tdsReportCodeOverride)}" placeholder="Leave blank for standard 392-1002"></div>
+      </div>
+      <p class="hint" style="margin:-4px 0 8px;">Only set this if this employee's salary TDS is genuinely reported under a different code than the company standard (e.g. a different nature-of-payment classification) — leave blank otherwise.</p>
 
       <div class="section-label">Bank Account (for salary credit)</div>
       <div class="grid cols-3">
@@ -891,6 +895,7 @@ async function submitEmployeeForm(ev, isEdit, e){
       phone: fd.get('phone').trim(), email: fd.get('email').trim(), address: fd.get('address').trim(),
       pan: fd.get('pan').trim().toUpperCase(), aadhaar: fd.get('aadhaar').trim(), uan: fd.get('uan').trim(),
       pfNumber: fd.get('pfNumber').trim(), esicNo: fd.get('esicNo').trim(),
+      tdsReportCodeOverride: fd.get('tdsReportCodeOverride').trim(),
       bankName: fd.get('bankName').trim(), bankAccNo: fd.get('bankAccNo').trim(), ifsc: fd.get('ifsc').trim().toUpperCase(),
       salaryHistory: e.salaryHistory
     };
@@ -3969,6 +3974,7 @@ function openTxnPrint(id){
    those are real, substantial systems in their own right and weren't part of what was asked
    for here. Ask if any of those are needed later. */
 const TDS_SECTIONS = [
+  { id:'SALARY',  oldCode:'192',     newCode:'392',          description:'Salary / Ex-Gratia (recorded as a bill, not a payslip)', defaultRate:0 },
   { id:'EPF',     oldCode:'192A',    newCode:'392',          description:'EPF premature withdrawal',           defaultRate:10 },
   { id:'COM-IH',  oldCode:'194H',    newCode:'393(1) Sl 1',  description:'Commission / brokerage — Indiv/HUF',  defaultRate:5 },
   { id:'COM-OT',  oldCode:'194H',    newCode:'393(1) Sl 1',  description:'Commission / brokerage — Others',     defaultRate:5 },
@@ -4142,7 +4148,7 @@ function taxComplianceData(year, month){
       lineItems.push({
         billAttached:false, date:p.generatedAt?p.generatedAt.slice(0,10):(period+'-01'),
         companyName:p.empName, billAmount:(p.gross||0)+(p.bonus||0), tdsPct: p.gross ? round2((p.tds||0)/((p.gross||0)+(p.bonus||0))*100) : 0,
-        tdsAmount:p.tds||0, tdsCode:'192 → 392', reportCode: ORG.tdsReportCodes.SALARY||'392-1002', pan: emp?emp.pan:'', remark:'Salary — '+p.period, section:'SALARY'
+        tdsAmount:p.tds||0, tdsCode:'192 → 392', reportCode: (emp&&emp.tdsReportCodeOverride) || ORG.tdsReportCodes.SALARY||'392-1002', pan: emp?emp.pan:'', remark:'Salary — '+p.period, section:'SALARY'
       });
     });
   }
