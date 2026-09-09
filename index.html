@@ -2653,6 +2653,7 @@ function openPartyForm(partyId){
         <div class="field"><label>PAN Number</label><input type="text" name="panNumber" value="${esc(p.panNumber)}"></div>
         <div class="field"><label>Address</label><textarea name="address" rows="3" style="resize:vertical;white-space:pre-wrap;">${esc(p.address)}</textarea></div>
       </div>
+      <div class="field"><label>Default TDS Section <span style="font-weight:400;color:var(--muted);">(optional — pre-fills on future bills for this vendor)</span></label><select name="defaultTdsSectionId"><option value="">— None —</option>${TDS_SECTIONS.map(s=>`<option value="${s.id}" ${p.defaultTdsSectionId===s.id?'selected':''}>${esc(tdsSectionLabel(s))}</option>`).join('')}</select></div>
       <div class="btn-row"><button type="submit" class="btn">Save Party</button><button type="button" class="btn secondary" id="mCancel">Cancel</button></div>
     </form>
   `, true);
@@ -2675,7 +2676,8 @@ async function submitPartyForm(ev, isEdit, p){
   const fd = new FormData(ev.target);
   const rec = { id: p.id||uid(), partyName: fd.get('partyName').trim(), partyType: fd.get('partyType'),
     contactPerson: fd.get('contactPerson').trim(), mobile: fd.get('mobile').trim(), email: fd.get('email').trim(),
-    gstNumber: fd.get('gstNumber').trim(), panNumber: fd.get('panNumber').trim(), address: fd.get('address').trim() };
+    gstNumber: fd.get('gstNumber').trim(), panNumber: fd.get('panNumber').trim(), address: fd.get('address').trim(),
+    defaultTdsSectionId: fd.get('defaultTdsSectionId')||'' };
   if(isEdit) rec._rev = p._rev;
   tagRecord(rec, !isEdit);
   if(isEdit){ const idx = PARTIES.findIndex(x=>x.id===p.id); PARTIES[idx]=rec; } else { PARTIES.push(rec); }
@@ -4623,7 +4625,7 @@ function openExpenseForm(expId){
         <div class="field" id="expCategoryWrap"><label>Category</label><select name="category">${EXPENSE_CATEGORIES.map(c=>`<option ${e.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
       </div>
       <div class="grid cols-3">
-        <div class="field" id="expVendorWrap"><label id="expVendorLabel">Vendor</label><select name="vendorId"><option value="">— Select Vendor —</option>${PARTIES.map(p=>`<option value="${p.id}" ${e.vendorId===p.id?'selected':''}>${esc(p.partyName)}</option>`).join('')}</select></div>
+        <div class="field" id="expVendorWrap"><label id="expVendorLabel">Vendor</label><select name="vendorId" id="expVendorSel"><option value="">— Select Vendor —</option>${PARTIES.map(p=>`<option value="${p.id}" ${e.vendorId===p.id?'selected':''}>${esc(p.partyName)}</option>`).join('')}</select></div>
         <div class="field" id="expEmployeeWrap" style="display:none;"><label>Staff Member</label><select name="employeeId" id="expEmployeeSel">
           <option value="">— Select Staff —</option>${activeStaff.map(s=>`<option value="${s.id}" ${e.employeeId===s.id?'selected':''}>${esc(s.name)} (${esc(s.empCode)})</option>`).join('')}
         </select></div>
@@ -4917,6 +4919,17 @@ function openExpenseForm(expId){
   });
   ['expBillAmount','expExchRate','expGstMode','expGstPct','expRcmRate','expRcmSupply','expTdsRate','expPaidAmount','expPF','expPT','expESIC','expOtherDed','expStatutoryAmount','expTransferAmount','expCgstOverride','expSgstOverride','expIgstOverride','expCreditNote'].forEach(id=> document.getElementById(id).addEventListener('input', drawTotalsPreview));
   document.getElementById('expTdsRate').addEventListener('input', ()=>{ document.getElementById('expTdsFlatAmount').value = ''; });
+  const vendorSel = document.getElementById('expVendorSel');
+  if(vendorSel) vendorSel.addEventListener('change', ()=>{
+    const vendor = PARTIES.find(p=>p.id===vendorSel.value);
+    const tdsSectionSel = document.getElementById('expTdsSection');
+    if(vendor && vendor.defaultTdsSectionId && tdsSectionSel && (!isEdit || !tdsSectionSel.value)){
+      tdsSectionSel.value = vendor.defaultTdsSectionId;
+      const sec = TDS_SECTION_BY_ID[vendor.defaultTdsSectionId];
+      if(sec){ document.getElementById('expTdsChk').checked = true; document.getElementById('expTdsFields').style.display = 'grid'; document.getElementById('expTdsRate').value = sec.defaultRate; }
+      drawTotalsPreview();
+    }
+  });
   drawTotalsPreview();
 
   /* Bank details shown here are read from Settings → Company Details — the person doesn't
