@@ -4143,7 +4143,11 @@ function taxComplianceData(year, month){
       });
     });
   }
-  EXPENSES.filter(e=> e.tdsApplicable && e.billDate>=monthStart && e.billDate<nextMonthDate).forEach(e=>{
+  // Salary payments are already counted above via Payslips (Section 192) — excluding
+  // billType==='SALARY' here specifically, since a Salary-type Bills & Expenses record is
+  // typically just tracking the same payment's bank transfer, not a separate TDS liability.
+  // Counting it again here was double-counting every salary TDS amount in the report.
+  EXPENSES.filter(e=> e.tdsApplicable && e.billType!=='SALARY' && e.billDate>=monthStart && e.billDate<nextMonthDate).forEach(e=>{
     const tot = calcExpenseTotals(e);
     const secId = e.tdsSectionId || 'OTHER';
     const secMeta = TDS_SECTION_BY_ID[secId];
