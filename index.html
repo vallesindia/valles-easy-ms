@@ -322,12 +322,12 @@ function buildPayload(){
   ensureLocal();
   return { app:'Valles Management System', version:2, savedAt:new Date().toISOString(),
     org:ORG, employees:EMPLOYEES, payslips:PAYSLIPS, compliance:COMPLIANCE,
-    parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES,
+    parties:PARTIES, documents:COMPANY_DOCS, transactions:TRANSACTIONS, expenses:EXPENSES, reimbursements:REIMBURSEMENTS,
     presence:LOCAL.presence, tombstones:LOCAL.tombstones };
 }
 
 /* ============================= STATE ============================= */
-let ORG = null, EMPLOYEES = [], PAYSLIPS = [], COMPLIANCE = {}, PARTIES = [], COMPANY_DOCS = [], TRANSACTIONS = [], EXPENSES = [];
+let ORG = null, EMPLOYEES = [], PAYSLIPS = [], COMPLIANCE = {}, PARTIES = [], COMPANY_DOCS = [], TRANSACTIONS = [], EXPENSES = [], REIMBURSEMENTS = [];
 let settingsUnlocked = false;
 let activeTab = 'dashboard';
 
@@ -509,6 +509,14 @@ function backfillOrgDefaults(){
   if(ORG.lumpSumBonusRate===undefined) ORG.lumpSumBonusRate = 0.3588;
   if(ORG.allowFinalisedTxnEdit===undefined) ORG.allowFinalisedTxnEdit = false;
   if(ORG.gstin===undefined) ORG.gstin = '';
+  if(ORG.tan===undefined) ORG.tan = '';
+  if(ORG.taxApplicableCode===undefined) ORG.taxApplicableCode = '(0020)COMPANY DEDUCTEES';
+  if(ORG.typeOfPayment===undefined) ORG.typeOfPayment = '(200)TDS/TCS Payable by Taxpayer';
+  if(!ORG.tdsReportCodes) ORG.tdsReportCodes = {
+    SALARY:'392-1002', 'RENT-LB':'393(1)-1009', 'RENT-PM':'393(1)-1009',
+    'CON-IH':'393(1)-1024', 'CON-OT':'393(1)-1024', TECH:'393(1)-1024', PROF:'393(1)-1024',
+    'COM-IH':'393(1)-1023', 'COM-OT':'393(1)-1023', PUR:'393(1)-1023', PERK:'393(1)-1023'
+  };
   /* Add new org-profile fields here going forward, not just in DEFAULT_ORG — this function
      is the one place that has to know about all of them. */
 }
@@ -538,9 +546,15 @@ async function loadAll(){
   COMPANY_DOCS = await getJSON('documents', []);
   TRANSACTIONS = await getJSON('transactions', []);
   EXPENSES = await getJSON('expenses', []);
+  REIMBURSEMENTS = await getJSON('reimbursements', []);
   refreshBrand();
 }
 async function saveOrg(){ return await setJSON('org-profile', ORG); }
+async function saveReimbursements(){
+  const remote = await pullRemotePayload();
+  REIMBURSEMENTS = mergeCollection('reimbursements', REIMBURSEMENTS, remote && remote.reimbursements, remote && remote.tombstones && remote.tombstones.reimbursements);
+  return await setJSON('reimbursements', REIMBURSEMENTS);
+}
 async function saveTransactions(){
   const remote = await pullRemotePayload();
   TRANSACTIONS = mergeCollection('transactions', TRANSACTIONS, remote && remote.transactions, remote && remote.tombstones && remote.tombstones.transactions);
@@ -2058,6 +2072,7 @@ function pullLatestFromDriveIntoLocal(remote){
   COMPANY_DOCS = mergeCollection('documents', COMPANY_DOCS, remote.documents, remote.tombstones && remote.tombstones.documents);
   TRANSACTIONS = mergeCollection('transactions', TRANSACTIONS, remote.transactions, remote.tombstones && remote.tombstones.transactions);
   EXPENSES = mergeCollection('expenses', EXPENSES, remote.expenses, remote.tombstones && remote.tombstones.expenses);
+  REIMBURSEMENTS = mergeCollection('reimbursements', REIMBURSEMENTS, remote.reimbursements, remote.tombstones && remote.tombstones.reimbursements);
   if(remote.compliance){
     Object.keys(remote.compliance).forEach(empId=>{
       const tombKind = 'compliance:'+empId;
@@ -2067,7 +2082,7 @@ function pullLatestFromDriveIntoLocal(remote){
   }
   ensureLocal();
   LOCAL.employees = EMPLOYEES; LOCAL.payslips = PAYSLIPS; LOCAL.parties = PARTIES;
-  LOCAL.documents = COMPANY_DOCS; LOCAL.transactions = TRANSACTIONS; LOCAL.expenses = EXPENSES; LOCAL.compliance = COMPLIANCE;
+  LOCAL.documents = COMPANY_DOCS; LOCAL.transactions = TRANSACTIONS; LOCAL.expenses = EXPENSES; LOCAL.reimbursements = REIMBURSEMENTS; LOCAL.compliance = COMPLIANCE;
   try{ localStorage.setItem(LS_KEY, JSON.stringify(LOCAL)); }catch(e){}
   if(activeTab && document.getElementById('content')) render(); // reflect anything that changed
 }
@@ -2082,8 +2097,8 @@ async function applyRestoredPayload(data){
   ORG = data.org || ORG; ORG.gdrive = gdriveKeep;
   backfillOrgDefaults();
   EMPLOYEES = data.employees||[]; PAYSLIPS = data.payslips||[]; COMPLIANCE = data.compliance||{};
-  PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[];
-  await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses();
+  PARTIES = data.parties||[]; COMPANY_DOCS = data.documents||[]; TRANSACTIONS = data.transactions||[]; EXPENSES = data.expenses||[]; REIMBURSEMENTS = data.reimbursements||[];
+  await saveOrg(); await saveEmployees(); await savePayslips(); await saveParties(); await saveCompanyDocs(); await saveTransactions(); await saveExpenses(); await saveReimbursements();
   for(const empId of Object.keys(COMPLIANCE)){ await saveCompliance(empId); }
   refreshBrand(); updateDocBadge();
 }
@@ -3543,6 +3558,94 @@ function openExportInvoiceModal(){
     }
   };
 }
+/* ============================= REIMBURSEMENT CLAIMS ============================= */
+const REIMBURSEMENT_HEADS = ['Vehicle', 'Mobile', 'Travel', 'Food', 'Medical', 'Other'];
+function blankReimbursementClaim(){ return { id:uid(), period:new Date().toISOString().slice(0,7), empId:'', accountingHead:'Vehicle', amountClaimed:0, supportingProvided:true, amountPaid:'' }; }
+let reimbClaimFilter = { month:'', empId:'' };
+function openReimbursementClaimsModal(){
+  const months = [...new Set(REIMBURSEMENTS.map(r=>r.period).filter(Boolean))].sort().reverse();
+  openModal(`
+    <div class="modal-head"><h3>Reimbursement Claims Tracker</h3><button class="modal-close" id="mClose">✕</button></div>
+    <div class="grid cols-3">
+      <div class="field"><label>Filter: Month</label><select id="reimbFilterMonth"><option value="">All Months</option>${months.map(m=>{ const [y,mm]=m.split('-'); const label=new Date(Number(y),Number(mm)-1,1).toLocaleString('en-IN',{month:'short',year:'numeric'}); return `<option value="${m}">${label}</option>`; }).join('')}</select></div>
+      <div class="field"><label>Filter: Employee</label><select id="reimbFilterEmp"><option value="">All Employees</option>${EMPLOYEES.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
+    </div>
+    <div class="section-label">Add Claim</div>
+    <div class="grid cols-4">
+      <div class="field" style="margin-bottom:0;"><label>Month</label><input type="month" id="reimbNewMonth" value="${new Date().toISOString().slice(0,7)}"></div>
+      <div class="field" style="margin-bottom:0;"><label>Employee</label><select id="reimbNewEmp"><option value="">— Select —</option>${EMPLOYEES.map(e=>`<option value="${e.id}">${esc(e.name)}</option>`).join('')}</select></div>
+      <div class="field" style="margin-bottom:0;"><label>Accounting Head</label><select id="reimbNewHead">${REIMBURSEMENT_HEADS.map(h=>`<option>${h}</option>`).join('')}</select></div>
+      <div class="field" style="margin-bottom:0;"><label>Amount Claimed (₹)</label><input type="number" min="0" step="0.01" id="reimbNewAmount" value="0"></div>
+    </div>
+    <div class="grid cols-3" style="margin-top:8px;">
+      <div class="field" style="margin-bottom:0;"><label class="checkline"><input type="checkbox" id="reimbNewSupporting" checked> Supportings Provided</label></div>
+      <div class="field" style="margin-bottom:0;"><label>Amount Paid (₹, optional)</label><input type="number" min="0" step="0.01" id="reimbNewPaid" placeholder="Leave blank if not yet paid"></div>
+      <div style="display:flex;align-items:flex-end;"><button type="button" class="btn sm" id="reimbAddBtn" style="margin-bottom:8px;">+ Add Claim</button></div>
+    </div>
+    <div class="divider"></div>
+    <div id="reimbTableWrap"></div>
+    <div class="btn-row" style="margin-top:14px;"><button class="btn secondary" id="mCancel">Close</button></div>
+  `, 'xwide');
+  document.getElementById('mClose').onclick = closeModal; document.getElementById('mCancel').onclick = closeModal;
+  document.getElementById('reimbFilterMonth').value = reimbClaimFilter.month;
+  document.getElementById('reimbFilterEmp').value = reimbClaimFilter.empId;
+  document.getElementById('reimbFilterMonth').onchange = (e)=>{ reimbClaimFilter.month = e.target.value; drawReimbTable(); };
+  document.getElementById('reimbFilterEmp').onchange = (e)=>{ reimbClaimFilter.empId = e.target.value; drawReimbTable(); };
+  document.getElementById('reimbAddBtn').onclick = async ()=>{
+    const empId = document.getElementById('reimbNewEmp').value;
+    if(!empId){ toast('Select an employee.', true); return; }
+    const emp = EMPLOYEES.find(x=>x.id===empId);
+    const claim = {
+      id: uid(), period: document.getElementById('reimbNewMonth').value, empId, empName: emp.name,
+      accountingHead: document.getElementById('reimbNewHead').value,
+      amountClaimed: Number(document.getElementById('reimbNewAmount').value)||0,
+      supportingProvided: document.getElementById('reimbNewSupporting').checked,
+      amountPaid: document.getElementById('reimbNewPaid').value!=='' ? Number(document.getElementById('reimbNewPaid').value) : null
+    };
+    tagRecord(claim, true);
+    REIMBURSEMENTS.push(claim);
+    const saved = await saveReimbursements();
+    if(saved===false){ toast('Could not save — local storage may be full.', true); return; }
+    toast('Claim added.');
+    document.getElementById('reimbNewAmount').value = 0; document.getElementById('reimbNewPaid').value = '';
+    drawReimbTable();
+  };
+  function drawReimbTable(){
+    const wrap = document.getElementById('reimbTableWrap');
+    let list = REIMBURSEMENTS.filter(r=> (!reimbClaimFilter.month || r.period===reimbClaimFilter.month) && (!reimbClaimFilter.empId || r.empId===reimbClaimFilter.empId));
+    list = list.slice().sort((a,b)=> (b.period||'').localeCompare(a.period||'') || (a.empName||'').localeCompare(b.empName||''));
+    if(!list.length){ wrap.innerHTML = '<div class="empty">No reimbursement claims recorded yet.</div>'; return; }
+    const totalClaimed = list.reduce((s,r)=> s+(Number(r.amountClaimed)||0), 0);
+    const totalPaid = list.reduce((s,r)=> s+(Number(r.amountPaid)||0), 0);
+    wrap.innerHTML = `<div style="overflow-x:auto;">
+      <table><thead><tr><th>Month</th><th>Name</th><th>Accounting Head</th><th class="num-cell">Amount for the Supportings Given</th><th>Supportings Provided</th><th class="num-cell">Amount Paid</th><th></th></tr></thead><tbody>
+        ${list.map(r=>{ const [y,m]=(r.period||'').split('-'); const monthLabel = y&&m ? new Date(Number(y),Number(m)-1,1).toLocaleString('en-IN',{month:'short',year:'numeric'}) : (r.period||'—'); return `
+        <tr>
+          <td>${esc(monthLabel)}</td>
+          <td>${esc(r.empName||'—')}</td>
+          <td>${esc(r.accountingHead||'—')}</td>
+          <td class="num-cell">${money2(r.amountClaimed)}</td>
+          <td>${r.supportingProvided?'<span class="pill good">YES</span>':'<span class="pill bad">NO</span>'}</td>
+          <td class="num-cell">${r.amountPaid!=null?`<b>${money2(r.amountPaid)}</b>`:`<button type="button" class="btn secondary sm" data-markpaid="${r.id}">Mark Paid</button>`}</td>
+          <td><button type="button" class="btn danger sm" data-delclaim="${r.id}">✕</button></td>
+        </tr>`; }).join('')}
+        <tr class="totrow"><td colspan="3"><b>TOTAL</b></td><td class="num-cell"><b>${money2(totalClaimed)}</b></td><td></td><td class="num-cell"><b>${money2(totalPaid)}</b></td><td></td></tr>
+      </tbody></table>
+      </div>`;
+    wrap.querySelectorAll('[data-delclaim]').forEach(b=> b.onclick = async ()=>{
+      REIMBURSEMENTS = REIMBURSEMENTS.filter(r=>r.id!==b.dataset.delclaim); recordTombstone('reimbursements', b.dataset.delclaim);
+      await saveReimbursements(); drawReimbTable();
+    });
+    wrap.querySelectorAll('[data-markpaid]').forEach(b=> b.onclick = async ()=>{
+      const r = REIMBURSEMENTS.find(x=>x.id===b.dataset.markpaid); if(!r) return;
+      const val = prompt('Amount paid for this claim (₹):', r.amountClaimed);
+      if(val===null) return;
+      r.amountPaid = Number(val)||0; tagRecord(r, false);
+      await saveReimbursements(); toast('Marked as paid.'); drawReimbTable();
+    });
+  }
+  drawReimbTable();
+}
 function openConsolidateProformaModal(){
   const defaultMonth = new Date().toISOString().slice(0,7);
   consolidateVesselRows = [blankVesselRow()];
@@ -3970,6 +4073,9 @@ function taxComplianceData(year, month){
   const period = year+'-'+String(month).padStart(2,'0');
   const monthStart = period+'-01';
   const nextMonthDate = month===12 ? (year+1)+'-01-01' : year+'-'+String(month+1).padStart(2,'0')+'-01';
+  // Assessment Year = the FY after the one this period falls in (Apr-Mar FY, AY is always FY+1)
+  const fyStartYear = month>=4 ? year : year-1;
+  const assessmentYear = `${fyStartYear+1}-${String((fyStartYear+2)%100).padStart(2,'0')}`;
 
   // TDS to Deposit — Salary (Section 192, from Payslips) + everything else (from Bills &
   // Expenses with TDS applicable), grouped by section for the breakdown, and also collected
@@ -3985,7 +4091,7 @@ function taxComplianceData(year, month){
       lineItems.push({
         billAttached:false, date:p.generatedAt?p.generatedAt.slice(0,10):(period+'-01'),
         companyName:p.empName, billAmount:(p.gross||0)+(p.bonus||0), tdsPct: p.gross ? round2((p.tds||0)/((p.gross||0)+(p.bonus||0))*100) : 0,
-        tdsAmount:p.tds||0, tdsCode:'192 → 392', pan: emp?emp.pan:'', remark:'Salary — '+p.period, section:'SALARY'
+        tdsAmount:p.tds||0, tdsCode:'192 → 392', reportCode: ORG.tdsReportCodes.SALARY||'392-1002', pan: emp?emp.pan:'', remark:'Salary — '+p.period, section:'SALARY'
       });
     });
   }
@@ -4000,12 +4106,23 @@ function taxComplianceData(year, month){
     const vendor = PARTIES.find(p=>p.id===e.vendorId);
     lineItems.push({
       billAttached: (e.billAttachments||e.attachments||[]).length>0, date:e.billDate,
-      companyName:e.vendorName||'—', billAmount:tot.amtINR, tdsPct:Number(e.tdsRate)||0,
+      companyName:e.vendorName||e.employeeName||'—', billAmount:tot.amtINR, tdsPct:Number(e.tdsRate)||0,
       tdsAmount:tot.tdsAmount, tdsCode: secMeta?`${secMeta.oldCode} → ${secMeta.newCode}`:'—',
-      pan: vendor?vendor.panNumber:'', remark:e.description||e.voucherNo, section:secId
+      reportCode: ORG.tdsReportCodes[secId]||'—', pan: vendor?vendor.panNumber:'', remark:e.description||e.voucherNo, section:secId
     });
   });
   const totalTdsToDeposit = round2(Object.values(bySection).reduce((s,x)=> s+x.amount, 0));
+  // Totals grouped by the actual filing report code (what the TDS Calculation report needs),
+  // not the internal section id — several sections can legitimately share one report code.
+  const totalsByReportCode = {};
+  lineItems.forEach(li=>{ totalsByReportCode[li.reportCode] = round2((totalsByReportCode[li.reportCode]||0) + li.tdsAmount); });
+
+  // No-TDS bills this period — for the "No TDS Table" section of the report.
+  const noTdsItems = EXPENSES.filter(e=> !e.tdsApplicable && e.billDate>=monthStart && e.billDate<nextMonthDate).map(e=>({
+    billAttached: (e.billAttachments||e.attachments||[]).length>0, date:e.billDate,
+    companyName:e.vendorName||e.employeeName||'—', description:e.description||e.voucherNo,
+    billAmount: calcExpenseTotals(e).amtINR, remark:e.voucherNo
+  }));
 
   // TDS Receivable — from clients withholding TDS on Invoice transactions.
   const receivableTxns = TRANSACTIONS.filter(t=> t.txnCategory==='INVOICE' && t.txnDate>=monthStart && t.txnDate<nextMonthDate && Number(t.tdsDeductedByClient)>0);
@@ -4028,7 +4145,7 @@ function taxComplianceData(year, month){
   const today = new Date();
   const overdueDays = Math.floor((today - deadline) / 86400000);
 
-  return { period, salaryTds, bySection, lineItems, totalTdsToDeposit, tdsReceivable, receivableCount:receivableTxns.length,
+  return { period, salaryTds, bySection, lineItems, totalsByReportCode, noTdsItems, assessmentYear, totalTdsToDeposit, tdsReceivable, receivableCount:receivableTxns.length,
     gstInputExpenses, expensesCount:expensesThisMonth.length, gstOutput, gstPayable, deadline, overdueDays };
 }
 function renderTaxCompliance(c, actions){
@@ -4087,28 +4204,48 @@ function renderTaxCompliance(c, actions){
       </div>
     </div>
     <div class="card" style="margin-top:14px;">
-      <h2>TDS Deduction Detail — ${esc(monthLong)} ${taxComplianceYear}</h2>
-      <p style="color:var(--muted);font-size:13px;">Every bill or payslip with TDS this month, by section.</p>
-      ${Object.keys(d.bySection).length ? Object.entries(d.bySection).map(([secId,s])=>{
-        const rows = d.lineItems.filter(li=>li.section===secId);
-        return `
-        <div class="section-label" style="margin-top:14px;">${esc(s.oldCode)} → ${esc(s.newCode)} · ${esc(s.label)}</div>
-        <div style="overflow-x:auto;">
-        <table><thead><tr><th>Bill Attached</th><th>Date</th><th>Company Name</th><th class="num-cell">Bill Amount</th><th class="num-cell">TDS%</th><th class="num-cell">TDS Amount</th><th>TDS Code</th><th>PAN No</th><th>Remark</th></tr></thead><tbody>
-          ${rows.map(li=>`<tr>
-            <td>${li.billAttached?'<span class="pill good">✓</span>':'<span class="pill bad">✕</span>'}</td>
-            <td>${esc(li.date||'—')}</td>
-            <td>${esc(li.companyName)}</td>
-            <td class="num-cell">${money2(li.billAmount)}</td>
-            <td class="num-cell">${li.tdsPct}%</td>
-            <td class="num-cell">${money2(li.tdsAmount)}</td>
-            <td>${esc(li.tdsCode)}</td>
-            <td>${esc(li.pan||'—')}</td>
-            <td>${esc(li.remark||'—')}</td>
-          </tr>`).join('')}
-        </tbody></table>
-        </div>`;
-      }).join('') : `<div class="empty">No TDS deducted this month.</div>`}
+      <h2>VALLES INDIA — TDS Calculation for ${esc(monthLabel).toUpperCase()} ${taxComplianceYear}</h2>
+      <p style="color:var(--muted);font-size:13px;">TAN No: <b>${esc(ORG.tan||'— not set —')}</b>, Tax Applicable: <b>${esc(ORG.taxApplicableCode)}</b>, Assessment Year: <b>${esc(d.assessmentYear)}</b>, Type of Payment: <b>${esc(ORG.typeOfPayment)}</b>${!ORG.tan?' <span style="color:var(--bad);">(set TAN in Settings → TDS Filing Details)</span>':''}</p>
+      ${d.lineItems.length ? `
+      <div style="overflow-x:auto;">
+      <table><thead><tr><th>Bill Attached</th><th>Date</th><th>Company Name</th><th class="num-cell">Bill Amount</th><th class="num-cell">TDS%</th><th class="num-cell">TDS Amount</th><th>TDS Code</th><th>PAN No</th><th>Remarks</th></tr></thead><tbody>
+        ${d.lineItems.map(li=>`<tr>
+          <td>${li.billAttached?'<span class="pill good">✓</span>':'<span class="pill bad">✕</span>'}</td>
+          <td>${esc(li.date||'—')}</td>
+          <td>${esc(li.companyName)}</td>
+          <td class="num-cell">${money2(li.billAmount)}</td>
+          <td class="num-cell">${li.tdsPct}%</td>
+          <td class="num-cell">${money2(li.tdsAmount)}</td>
+          <td>${esc(li.reportCode)}</td>
+          <td>${esc(li.pan||'—')}</td>
+          <td>${esc(li.remark||'—')}</td>
+        </tr>`).join('')}
+      </tbody></table>
+      </div>
+      <div class="divider"></div>
+      <div class="grid cols-3">
+        ${Object.entries(d.totalsByReportCode).map(([code,amt])=>`<div><label>Total ${esc(code)}</label><div><b>${money2(amt)}</b></div></div>`).join('')}
+      </div>
+      <div style="margin-top:10px;font-size:15px;"><b>Total TDS Calculation Amount: ${money2(d.totalTdsToDeposit)}</b></div>
+      ` : `<div class="empty">No TDS deducted this month.</div>`}
+    </div>
+    <div class="card" style="margin-top:14px;">
+      <h2>VALLES INDIA — No TDS Table for ${esc(monthLabel).toUpperCase()} ${taxComplianceYear}</h2>
+      <p style="color:var(--muted);font-size:13px;">Bills this month with no TDS applicable.</p>
+      ${d.noTdsItems.length ? `
+      <div style="overflow-x:auto;">
+      <table><thead><tr><th>Bill Attached</th><th>Date</th><th>Company Name</th><th>Description</th><th class="num-cell">Bill Amount</th><th>Remarks</th></tr></thead><tbody>
+        ${d.noTdsItems.map(li=>`<tr>
+          <td>${li.billAttached?'<span class="pill good">✓</span>':'<span class="pill bad">✕</span>'}</td>
+          <td>${esc(li.date||'—')}</td>
+          <td>${esc(li.companyName)}</td>
+          <td>${esc(li.description||'—')}</td>
+          <td class="num-cell">${money2(li.billAmount)}</td>
+          <td>${esc(li.remark||'—')}</td>
+        </tr>`).join('')}
+      </tbody></table>
+      </div>
+      ` : `<div class="empty">No non-TDS bills this month.</div>`}
     </div>
     <div class="card" style="margin-top:14px;background:linear-gradient(135deg,#B91C1C,#7F1D1D);color:#fff;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div>
@@ -4229,15 +4366,20 @@ function printTaxComplianceReport(kind, d, monthLong){
         </div>
         <div class="payslip-title">${isTds?'TDS LIABILITY REPORT':'GST RECONCILIATION REPORT'} — ${esc(monthLong).toUpperCase()} ${taxComplianceYear}</div>
         ${isTds ? `
+        <p style="font-size:11px;">TAN No: <b>${esc(ORG.tan||'—')}</b>, Tax Applicable — ${esc(ORG.taxApplicableCode)}, Assessment Year ${esc(d.assessmentYear)}, Type of Payment — ${esc(ORG.typeOfPayment)}</p>
         <table class="pstable items-table" style="margin-top:8px;">
-          <tr class="earnhead"><td>SECTION (OLD)</td><td>SECTION (NEW)</td><td>DESCRIPTION</td><td>ENTRIES</td><td class="amtcell">AMOUNT</td><td class="amtcell">PENDING</td></tr>
-          ${Object.values(d.bySection).map(s=>`<tr><td class="val">${esc(s.oldCode)}</td><td class="val">${esc(s.newCode)}</td><td class="val">${esc(s.label)}</td><td class="val">${s.count}</td><td class="val amtcell">${money2(s.amount)}</td><td class="val amtcell">${money2(s.pending)}</td></tr>`).join('')}
-          <tr class="totrow"><td colspan="4">TOTAL TDS TO DEPOSIT</td><td class="amtcell" colspan="2">${money2(d.totalTdsToDeposit)}</td></tr>
+          <tr class="earnhead"><td>BILL ATTACHED</td><td>DATE</td><td>COMPANY NAME</td><td class="amtcell">BILL AMOUNT</td><td>TDS%</td><td class="amtcell">TDS AMOUNT</td><td>TDS CODE</td><td>PAN NO</td><td>REMARKS</td></tr>
+          ${d.lineItems.map(li=>`<tr><td class="val">${li.billAttached?'Yes':'No'}</td><td class="val">${esc(li.date||'—')}</td><td class="val">${esc(li.companyName)}</td><td class="val amtcell">${money2(li.billAmount)}</td><td class="val">${li.tdsPct}%</td><td class="val amtcell">${money2(li.tdsAmount)}</td><td class="val">${esc(li.reportCode)}</td><td class="val">${esc(li.pan||'—')}</td><td class="val">${esc(li.remark||'—')}</td></tr>`).join('')}
+        </table>
+        <table class="pstable" style="margin-top:8px;">
+          ${Object.entries(d.totalsByReportCode).map(([code,amt])=>`<tr><td class="lbl">Total ${esc(code)}</td><td class="val amtcell">${money2(amt)}</td></tr>`).join('')}
+          <tr class="totrow"><td>Total TDS Calculation Amount</td><td class="amtcell">${money2(d.totalTdsToDeposit)}</td></tr>
         </table>
         <p style="font-size:12px;margin-top:10px;">Deposit deadline: <b>${d.deadline.toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'})}</b>${d.overdueDays>0?` — <span style="color:#DC2626;">OVERDUE by ${d.overdueDays} day(s)</span>`:''}</p>
-        <table class="pstable items-table" style="margin-top:12px;">
-          <tr class="earnhead"><td>BILL ATTACHED</td><td>DATE</td><td>COMPANY NAME</td><td class="amtcell">BILL AMOUNT</td><td>TDS%</td><td class="amtcell">TDS AMOUNT</td><td>TDS CODE</td><td>PAN NO</td><td>REMARK</td></tr>
-          ${d.lineItems.map(li=>`<tr><td class="val">${li.billAttached?'Yes':'No'}</td><td class="val">${esc(li.date||'—')}</td><td class="val">${esc(li.companyName)}</td><td class="val amtcell">${money2(li.billAmount)}</td><td class="val">${li.tdsPct}%</td><td class="val amtcell">${money2(li.tdsAmount)}</td><td class="val">${esc(li.tdsCode)}</td><td class="val">${esc(li.pan||'—')}</td><td class="val">${esc(li.remark||'—')}</td></tr>`).join('')}
+        <div class="payslip-title" style="margin-top:16px;">NO TDS TABLE FOR ${esc(monthLong).toUpperCase()} ${taxComplianceYear}</div>
+        <table class="pstable items-table" style="margin-top:8px;">
+          <tr class="earnhead"><td>BILL ATTACHED</td><td>DATE</td><td>COMPANY NAME</td><td>DESCRIPTION</td><td class="amtcell">BILL AMOUNT</td><td>REMARKS</td></tr>
+          ${d.noTdsItems.map(li=>`<tr><td class="val">${li.billAttached?'Yes':'No'}</td><td class="val">${esc(li.date||'—')}</td><td class="val">${esc(li.companyName)}</td><td class="val">${esc(li.description||'—')}</td><td class="val amtcell">${money2(li.billAmount)}</td><td class="val">${esc(li.remark||'—')}</td></tr>`).join('')}
         </table>
         ` : `
         <table class="pstable">
@@ -4256,15 +4398,22 @@ function printTaxComplianceReport(kind, d, monthLong){
   document.getElementById('printBtn').onclick = ()=> window.print();
 }
 function exportTaxComplianceCsv(d, monthLong){
-  const rows = [['Section (Old)','Section (New)','Description','Entries','Amount','Pending']];
-  Object.values(d.bySection).forEach(s=> rows.push([s.oldCode, s.newCode, s.label, s.count, s.amount, s.pending]));
+  const rows = [[`VALLES INDIA - TDS CALCULATION FOR ${monthLong.toUpperCase()} ${taxComplianceYear}`]];
+  rows.push([`TAN No: ${ORG.tan||'—'}, Tax Applicable - ${ORG.taxApplicableCode}, Assessment Year ${d.assessmentYear}, Type of Payment - ${ORG.typeOfPayment}`]);
+  rows.push([]);
+  rows.push(['Bill Attached','Date','Company Name','Bill Amount','TDS%','TDS Amount','TDS Code','PAN No','Remarks']);
+  d.lineItems.forEach(li=> rows.push([li.billAttached?'Yes':'No', li.date, li.companyName, li.billAmount, li.tdsPct, li.tdsAmount, li.reportCode, li.pan, li.remark]));
+  rows.push([]);
+  Object.entries(d.totalsByReportCode).forEach(([code,amt])=> rows.push([`Total ${code}`, '', '', '', '', amt]));
+  rows.push(['Total TDS Calculation Amount', '', '', '', '', d.totalTdsToDeposit]);
+  rows.push([]);
+  rows.push([`VALLES INDIA - NO TDS TABLE FOR ${monthLong.toUpperCase()} ${taxComplianceYear}`]);
+  rows.push(['Bill Attached','Date','Company Name','Description','Bill Amount','Remarks']);
+  d.noTdsItems.forEach(li=> rows.push([li.billAttached?'Yes':'No', li.date, li.companyName, li.description, li.billAmount, li.remark]));
   rows.push([]);
   rows.push(['GST Output', '', '', '', d.gstOutput, '']);
   rows.push(['GST Input Credit', '', '', '', d.gstInputExpenses, '']);
   rows.push(['GST Payable', '', '', '', d.gstPayable, '']);
-  rows.push([]);
-  rows.push(['Bill Attached','Date','Company Name','Bill Amount','TDS%','TDS Amount','TDS Code','PAN No','Remark']);
-  d.lineItems.forEach(li=> rows.push([li.billAttached?'Yes':'No', li.date, li.companyName, li.billAmount, li.tdsPct, li.tdsAmount, li.tdsCode, li.pan, li.remark]));
   const csv = rows.map(r=> r.map(v=> typeof v==='string' && (v.includes(',')||v.includes('"')) ? '"'+v.replace(/"/g,'""')+'"' : v).join(',')).join('\n');
   const blob = new Blob([csv], {type:'text/csv'});
   const url = URL.createObjectURL(blob);
@@ -4273,8 +4422,9 @@ function exportTaxComplianceCsv(d, monthLong){
   setTimeout(()=> URL.revokeObjectURL(url), 5000);
 }
 function renderExpenses(c, actions){
-  actions.innerHTML = `<button class="btn" id="newExpBtn">+ New Bill / Expense</button>`;
+  actions.innerHTML = `<button class="btn secondary" id="reimbClaimsBtn">🧾 Reimbursement Claims</button> <button class="btn" id="newExpBtn">+ New Bill / Expense</button>`;
   actions.querySelector('#newExpBtn').onclick = ()=> openExpenseForm();
+  actions.querySelector('#reimbClaimsBtn').onclick = ()=> openReimbursementClaimsModal();
 
   const withTotals = EXPENSES.map(e=>({ e, tot:calcExpenseTotals(e) }));
   const totalPayable = withTotals.reduce((s,x)=> s+x.tot.netPayable, 0);
@@ -5091,6 +5241,22 @@ function renderSettings(c, actions){
     </div>
 
     <div class="card">
+      <h2>TDS Filing Details</h2>
+      <p style="color:var(--muted);font-size:13px;">Feeds the header of the monthly TDS Calculation report in Tax Compliance. The report codes below (e.g. "393(1)-1009") are pre-filled as a starting point from a sample return — <b>verify these against your own TAN's actual filing requirements before relying on them</b>, since the exact code can vary by how your return is prepared.</p>
+      <div class="grid cols-3">
+        <div class="field"><label>TAN Number</label><input type="text" id="tdsTanField" value="${esc(ORG.tan)}" placeholder="e.g. MUMV28227D"></div>
+        <div class="field"><label>Tax Applicable Code</label><input type="text" id="tdsTaxApplField" value="${esc(ORG.taxApplicableCode)}"></div>
+        <div class="field"><label>Type of Payment</label><input type="text" id="tdsPaymentTypeField" value="${esc(ORG.typeOfPayment)}"></div>
+      </div>
+      <div class="section-label" style="margin-top:14px;">Report Codes by TDS Section</div>
+      <div class="grid cols-3">
+        <div class="field" style="margin-bottom:0;"><label>Salary (Section 192)</label><input type="text" data-repcode="SALARY" value="${esc(ORG.tdsReportCodes.SALARY||'')}"></div>
+        ${TDS_SECTIONS.map(s=>`<div class="field" style="margin-bottom:0;"><label>${esc(s.oldCode)} — ${esc(s.description)}</label><input type="text" data-repcode="${s.id}" value="${esc(ORG.tdsReportCodes[s.id]||'')}"></div>`).join('')}
+      </div>
+      <div class="btn-row" style="margin-top:14px;"><button class="btn sm" id="saveTdsFilingBtn">Save TDS Filing Details</button></div>
+    </div>
+
+    <div class="card">
       <h2>CTC Structuring Policy</h2>
       <p style="color:var(--muted);font-size:13px;">Governs how "Revise by CTC" turns a single Cost-to-Company figure into a full monthly breakdown: <b>Basic</b> is set as this % of CTC; <b>HRA</b> = 50% of Basic; <b>Children Education</b> is fixed; <b>LTA</b> = Basic ÷ 12; <b>PF Employee</b> and <b>PF Employer</b> are each 12% of Basic (or the capped wage, per the ceiling setting above); <b>Professional Tax</b> follows the slabs above; and <b>Other Allowance</b> is the balancing figure that makes everything reconcile exactly back to the CTC entered. This mirrors how your management structures pay — adjust the ratio to match company policy.</p>
       <div class="grid cols-3">
@@ -5460,6 +5626,15 @@ function renderSettings(c, actions){
     const lsr = document.getElementById('lumpSumRateField');
     if(lsr) ORG.lumpSumBonusRate = (Number(lsr.value)||0)/100;
     await saveOrg(); toast('Income tax rules saved.');
+  };
+
+  const saveTdsFilingBtn = document.getElementById('saveTdsFilingBtn');
+  if(saveTdsFilingBtn) saveTdsFilingBtn.onclick = async ()=>{
+    ORG.tan = document.getElementById('tdsTanField').value.trim();
+    ORG.taxApplicableCode = document.getElementById('tdsTaxApplField').value.trim();
+    ORG.typeOfPayment = document.getElementById('tdsPaymentTypeField').value.trim();
+    document.querySelectorAll('[data-repcode]').forEach(inp=>{ ORG.tdsReportCodes[inp.dataset.repcode] = inp.value.trim(); });
+    await saveOrg(); toast('TDS filing details saved.');
   };
 
   const saveCtcBtn = document.getElementById('saveCtcPolicy');
